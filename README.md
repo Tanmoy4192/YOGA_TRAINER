@@ -605,7 +605,7 @@ return False, None        # perfect → play video → green → "Good form"
 | Key | File | Video timestamp |
 |-----|------|----------------|
 | `hand` | `hand_exercise.py` ✅ | 1:07 |
-| `leg` | `leg_exercise.py` | 12:07 |
+| `leg` | `leg_exercise.py` | 11:07 |
 | `neuro` | `neuro_exercise.py` | 17:10 |
 | `eye` | `eye_exercise.py` | 23:50 |
 | `kapalabhati` | `kapalabhati_exercise.py` | 29:31 |

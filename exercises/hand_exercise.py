@@ -1,457 +1,661 @@
 """
-exercises/hand_exercise.py — Hand Exercises
-FIXES:
-  1. _check_p1 RAISE: arms mid-raise = guidance not error (is_error=False)
-  2. _at_rest uses normalized coords not pixel offset
-  3. _check_rotation: remove wrong height guard, check arm is extended instead
-  4. All check methods return (is_error, message) correctly
+exercises/hand_exercise.py — Complete SKY Yoga Hand Exercises
+
+11 EXERCISES with proper state machines and geometry-based evaluation:
+
+1. RAISE ARMS + HOLD (3 reps)
+   - Legs normal width (not too wide/narrow)
+   - Raise both arms, join palms (10 sec watch)
+   - Hold 4 breaths
+   - Lower arms 2 breaths
+   - Up→Down cycle = 1 rep
+
+2. T-POSE BREATHE (5 reps)
+   - T-position (arms shoulder level, wide apart)
+   - Breathe in
+   - Forward + together (arms straight)
+   - Back to T
+   - T→Forward→T = 1 rep
+
+3-6. WRIST ROTATIONS (5 reps each)
+   - Right hand clockwise (5 reps)
+   - Right hand counter-clockwise (5 reps)
+   - Left hand clockwise (5 reps)
+   - Left hand counter-clockwise (5 reps)
+
+7-8. BOTH HANDS ROTATION (5 reps each)
+   - Both hands together clockwise (5 reps)
+   - Both hands together counter-clockwise (5 reps)
+
+9. ARM SWINGS (5 reps CW + 5 reps CCW = 10 total)
+   - Right leg forward, rotate arms clockwise
+   - Down position = 1 rep
+   - Then counter-clockwise 5 reps
+
+10. TORSO ROTATION (3 reps)
+    - Thumbs touching, shoulder level
+    - Rotate right → front → left = 1 rep
+
+11. KNEE ROTATION (3 reps)
+    - Hands on knees
+    - 3x clockwise + 3x counter-clockwise = 1 rep
 """
 
-import math
 from core.base_controller import BaseController
-from core.utils import calculate_angle, dist, lm_px
+from core.utils import angle, dist, px, visible, shoulder_width
 from core.motion_tracker import MotionTracker
 from core.breath_detector import BreathDetector
 
 EXERCISE_KEY = "hand"
 
 _PHASES = [
+    # EXERCISE 1: RAISE ARMS + HOLD
     {
-        "id": "p1_arms_up",
-        "name": "Raise Arms Overhead",
-        "start": 0,   "active": 22,  "end": 185,
+        "id": "p1_raise_hold",
+        "name": "Raise Arms & Hold",
+        "start": 0,
+        "active": 10,
+        "end": 185,
         "target": 3,
-        "watch_msg": "Watch — arms up, palms joined overhead",
-        "check_landmarks": [11,12,13,14,15,16],
+        "watch_msg": "Raise arms, join palms, hold for 4 breaths, then lower for 2 breaths",
+        "check_landmarks": [11, 12, 13, 14, 15, 16, 23, 24, 27, 28],
     },
+    
+    # EXERCISE 2: T-POSE BREATHE
     {
         "id": "p2_t_pose",
         "name": "T-Pose Breathe",
-        "start": 185, "active": 205, "end": 270,
+        "start": 185,
+        "active": 230,
+        "end": 270,
         "target": 5,
-        "watch_msg": "Watch — arms wide on inhale, palms front on exhale",
-        "check_landmarks": [11,12,13,14,15,16],
+        "watch_msg": "Raise arms upto shoulder level",
+        "check_landmarks": [11, 12, 13, 14, 15, 16],
     },
+    
+    # EXERCISE 3: RIGHT WRIST CLOCKWISE
     {
-        "id": "p3a_rot_right",
-        "name": "Right Hand CW Rotation",
-        "start": 270, "active": 300, "end": 335,
+        "id": "p3_right_cw",
+        "name": "Right Hand Clockwise",
+        "start": 270,
+        "active": 285,
+        "end": 285,
         "target": 5,
-        "watch_msg": "Watch — right hand rotating clockwise",
-        "check_landmarks": [12,14,16],
-        "side": "right",
+        "watch_msg": "Join right fingers, rotate your hand clockwise",
+        "check_landmarks": [12, 14, 16],
     },
+    # EXERCISE 5: LEFT WRIST CLOCKWISE
     {
-        "id": "p3b_rot_left",
-        "name": "Left Hand CW Rotation",
-        "start": 335, "active": 338, "end": 372,
+        "id": "p5_left_cw",
+        "name": "Left Hand Clockwise",
+        "start": 305,
+        "active": 310,
+        "end": 331,
         "target": 5,
-        "watch_msg": "Watch — left hand rotating clockwise",
-        "check_landmarks": [11,13,15],
-        "side": "left",
+        "watch_msg": "Join left fingers, rotate clockwise",
+        "check_landmarks": [11, 13, 15],
     },
+    # EXERCISE 4: RIGHT WRIST COUNTER-CLOCKWISE
     {
-        "id": "p3c_rot_right_ccw",
-        "name": "Right Hand CCW Rotation",
-        "start": 372, "active": 375, "end": 393,
+        "id": "p4_right_ccw",
+        "name": "Right Hand Counter-Clockwise",
+        "start": 332,
+        "active": 337,
+        "end": 358,
         "target": 5,
-        "watch_msg": "Watch — right hand anti-clockwise",
-        "check_landmarks": [12,14,16],
-        "side": "right",
+        "watch_msg": "Right hand rotate counter-clockwise",
+        "check_landmarks": [12, 14, 16],
     },
+    
+
+    
+    # EXERCISE 6: LEFT WRIST COUNTER-CLOCKWISE
     {
-        "id": "p3d_rot_left_ccw",
-        "name": "Left Hand CCW Rotation",
-        "start": 393, "active": 396, "end": 414,
+        "id": "p6_left_ccw",
+        "name": "Left Hand Counter-Clockwise",
+        "start": 359,
+        "active": 363,
+        "end": 382,
         "target": 5,
-        "watch_msg": "Watch — left hand anti-clockwise",
-        "check_landmarks": [11,13,15],
-        "side": "left",
+        "watch_msg": "Left hand rotate counter-clockwise",
+        "check_landmarks": [11, 13, 15],
     },
+    
+    # EXERCISE 7: BOTH HANDS CLOCKWISE
     {
-        "id": "p3e_both_cw",
-        "name": "Both Hands CW Rotation",
-        "start": 414, "active": 417, "end": 435,
+        "id": "p7_both_cw",
+        "name": "Both Hands Clockwise",
+        "start": 391,
+        "active": 525,
+        "end": 585,
         "target": 5,
-        "watch_msg": "Watch — both hands clockwise together",
-        "check_landmarks": [11,12,13,14,15,16],
-        "side": "both",
+        "watch_msg": "Join both hands, rotate together clockwise",
+        "check_landmarks": [11, 12, 13, 14, 15, 16],
     },
+    
+    # EXERCISE 8: BOTH HANDS COUNTER-CLOCKWISE
     {
-        "id": "p3f_both_ccw",
-        "name": "Both Hands CCW Rotation",
-        "start": 435, "active": 438, "end": 450,
+        "id": "p8_both_ccw",
+        "name": "Both Hands Counter-Clockwise",
+        "start": 585,
+        "active": 600,
+        "end": 660,
         "target": 5,
-        "watch_msg": "Watch — both hands anti-clockwise",
-        "check_landmarks": [11,12,13,14,15,16],
-        "side": "both",
+        "watch_msg": "Both hands rotate together counter-clockwise",
+        "check_landmarks": [11, 12, 13, 14, 15, 16],
     },
+    
+    # EXERCISE 9: ARM SWINGS
     {
-        "id": "p4_arm_swing",
-        "name": "Arm Swing (Foot Forward)",
-        "start": 450, "active": 455, "end": 515,
+        "id": "p9_arm_swings",
+        "name": "Arm Swings (Right leg forward)",
+        "start": 660,
+        "active": 675,
+        "end": 750,
         "target": 10,
-        "watch_msg": "Watch — one foot forward, swing arms in circles",
-        "check_landmarks": [11,12,15,16,27,28],
+        "watch_msg": "Step right leg forward, swing both arms in circles clockwise then counter-clockwise",
+        "check_landmarks": [11, 12, 15, 16, 27, 28],
     },
+    
+    # EXERCISE 10: TORSO ROTATION
     {
-        "id": "p5_zoom",
-        "name": "Finger Exercise",
-        "start": 515, "active": 515, "end": 540,
-        "target": 0,
-        "zoom": True,
-        "watch_msg": "Watch the finger exercise closely",
+        "id": "p10_torso",
+        "name": "Torso Rotation",
+        "start": 750,
+        "active": 765,
+        "end": 825,
+        "target": 3,
+        "watch_msg": "Thumbs touching at shoulder level, rotate right → front → left",
+        "check_landmarks": [11, 12, 15, 16, 23, 24],
     },
+    
+    # EXERCISE 11: KNEE ROTATION
     {
-        "id": "p5_torso",
-        "name": "Upper Body Rotation",
-        "start": 540, "active": 543, "end": 603,
-        "target": 5,
-        "watch_msg": "Watch — feet 8 inches apart, thumbs touch, rotate body",
-        "check_landmarks": [11,12,23,24,27,28],
-    },
-    {
-        "id": "p6_knee",
+        "id": "p11_knee",
         "name": "Knee Rotation",
-        "start": 603, "active": 606, "end": 651,
-        "target": 9,
-        "watch_msg": "Watch — feet 3 inches, hands on knees, rotate",
-        "check_landmarks": [25,26,27,28],
-        "side": "knees",
+        "start": 825,
+        "active": 840,
+        "end": 900,
+        "target": 3,
+        "watch_msg": "Hands on knees, rotate clockwise 3 times then counter-clockwise 3 times",
+        "check_landmarks": [23, 24, 25, 26, 27, 28, 15, 16],
     },
 ]
 
 
 class WorkoutController(BaseController):
+    """Hand exercises controller with 11 complete exercises."""
 
     def __init__(self):
+        """Initialize all state machines."""
         super().__init__()
+        
+        # Motion trackers for rotations
         self._tw_l = MotionTracker(1.5, 12)
         self._tw_r = MotionTracker(1.5, 12)
         self._tk_l = MotionTracker(2.0, 10)
         self._tk_r = MotionTracker(2.0, 10)
         self._ts_l = MotionTracker(2.0, 15)
         self._ts_r = MotionTracker(2.0, 15)
-        self._breath       = BreathDetector(min_breath_sec=2.0)
-        self._p1_state     = "RAISE"
-        self._p1_hold_b    = 0
-        self._p1_rest_b    = 0
-        self._last_cyc_l   = 0
-        self._last_cyc_r   = 0
-        self._last_cyc_k   = 0
-        self._sw_baseline  = None
-        self._p2_sub       = "CLOSE"
-        self._arm_swing_ph = "DOWN"
-        self._torso_ph     = "CENTER"
+        
+        # Breath detector
+        self._breath = BreathDetector(min_breath_sec=2.0)
+        
+        # ─── EXERCISE 1: RAISE ARMS ─────────────────────────────────────
+        self._p1_state = "RAISE"  # RAISE → HOLD → LOWER
+        self._p1_hold_b = 0
+        self._p1_lower_b = 0
+        self._arms_raised = False
+        
+        # ─── EXERCISE 2: T-POSE ─────────────────────────────────────────
+        self._p2_state = "T_POS"
+        self._p2_forward_once = False
+        
+        # ─── ROTATION CYCLES ────────────────────────────────────────────
+        self._last_cyc_l = 0
+        self._last_cyc_r = 0
+        self._last_cyc_k = 0
+        
+        # ─── TORSO ROTATION ─────────────────────────────────────────────
+        self._torso_rotated = False
+        self._torso_baseline_gap = None
+        
+        # ─── KNEE ROTATION ──────────────────────────────────────────────
+        self._knee_cw_count = 0
+        self._knee_ccw_count = 0
+        
+        # ─── ARM SWINGS ─────────────────────────────────────────────────
+        self._swing_phase = "CW"  # CW or CCW
+        self._arms_down = False
+        
+        # Message tracking (debounce)
+        self._last_message = {}
 
     def phases(self) -> list:
         return _PHASES
 
     def on_phase_change(self, phase: dict):
-        for t in [self._tw_l, self._tw_r, self._tk_l,
-                  self._tk_r, self._ts_l, self._ts_r]:
+        """Reset all state machines."""
+        for t in [self._tw_l, self._tw_r, self._tk_l, self._tk_r, self._ts_l, self._ts_r]:
             t.reset()
         self._breath.reset()
-        self._p1_state     = "RAISE"
-        self._p1_hold_b    = 0
-        self._p1_rest_b    = 0
-        self._last_cyc_l   = 0
-        self._last_cyc_r   = 0
-        self._last_cyc_k   = 0
-        self._sw_baseline  = None
-        self._p2_sub       = "CLOSE"
-        self._arm_swing_ph = "DOWN"
-        self._torso_ph     = "CENTER"
+        
+        self._p1_state = "RAISE"
+        self._p1_hold_b = 0
+        self._p1_lower_b = 0
+        self._arms_raised = False
+        
+        self._p2_state = "T_POS"
+        self._p2_forward_once = False
+        
+        self._last_cyc_l = 0
+        self._last_cyc_r = 0
+        self._last_cyc_k = 0
+        
+        self._torso_rotated = False
+        self._torso_baseline_gap = None
+        
+        self._knee_cw_count = 0
+        self._knee_ccw_count = 0
+        
+        self._swing_phase = "CW"
+        self._arms_down = False
+        
+        self._last_message = {}
 
     @property
     def current_phase_name(self) -> str:
         p = self._get_phase(self._video_pos)
         return p["name"] if p else "Hand Exercises"
 
-    @property
-    def coach_state(self) -> str:
-        return self._coach_state
+    # ─────────────────────────────────────────────────────────────────────
+    # TRACKERS
+    # ─────────────────────────────────────────────────────────────────────
 
-    def _track(self, lm, w, h):
-        """Update all trackers. Called first inside check_pose."""
-        self._tw_l.update(lm[15].x*w, lm[15].y*h)
-        self._tw_r.update(lm[16].x*w, lm[16].y*h)
-        self._tk_l.update(lm[25].x*w, lm[25].y*h)
-        self._tk_r.update(lm[26].x*w, lm[26].y*h)
-        self._ts_l.update(lm[11].x*w, lm[11].y*h)
-        self._ts_r.update(lm[12].x*w, lm[12].y*h)
+    def _track(self, lm, w: int, h: int):
+        """Update all motion and breath trackers."""
+        self._tw_l.update(lm[15].x * w, lm[15].y * h)
+        self._tw_r.update(lm[16].x * w, lm[16].y * h)
+        self._tk_l.update(lm[25].x * w, lm[25].y * h)
+        self._tk_r.update(lm[26].x * w, lm[26].y * h)
+        self._ts_l.update(lm[11].x * w, lm[11].y * h)
+        self._ts_r.update(lm[12].x * w, lm[12].y * h)
         self._breath.update((lm[11].y + lm[12].y) / 2)
 
-    # ── check_pose dispatcher ─────────────────────────────────────────
-    def check_pose(self, user_lm, ref_lm, w, h, phase) -> tuple:
-        self._track(user_lm, w, h)   # always update trackers first
+    # ─────────────────────────────────────────────────────────────────────
+    # MAIN DISPATCHER
+    # ─────────────────────────────────────────────────────────────────────
+
+    def check_pose(self, user_lm, w: int, h: int, phase: dict) -> tuple:
+        """Route to exercise-specific check."""
+        self._track(user_lm, w, h)
+        
         pid = phase["id"]
-        if pid == "p1_arms_up":               return self._check_p1(user_lm, w, h)
-        elif pid == "p2_t_pose":              return self._check_p2(user_lm, w, h)
-        elif pid.startswith("p3"):            return self._check_rotation(user_lm, w, h, phase)
-        elif pid == "p4_arm_swing":           return self._check_arm_swing(user_lm, w, h)
-        elif pid == "p5_torso":               return self._check_torso(user_lm, w, h)
-        elif pid == "p6_knee":                return self._check_knee(user_lm, w, h)
-        return False, None
+        
+        if pid == "p1_raise_hold":
+            return self._check_p1(user_lm, w, h)
+        elif pid == "p2_t_pose":
+            return self._check_p2(user_lm, w, h)
+        elif pid in ["p3_right_cw", "p4_right_ccw", "p5_left_cw", "p6_left_ccw", 
+                     "p7_both_cw", "p8_both_ccw"]:
+            return self._check_rotation(user_lm, w, h, phase)
+        elif pid == "p9_arm_swings":
+            return self._check_swings(user_lm, w, h)
+        elif pid == "p10_torso":
+            return self._check_torso(user_lm, w, h)
+        elif pid == "p11_knee":
+            return self._check_knee(user_lm, w, h)
+        
+        return (False, None)
 
-    # ── detect_rep dispatcher ─────────────────────────────────────────
-    def detect_rep(self, user_lm, w, h):
+    def detect_rep(self, user_lm, w: int, h: int):
+        """Count reps by phase."""
         p = self._get_phase(self._video_pos)
-        if not p: return
+        if not p:
+            return
+        
         pid = p["id"]
-        if pid == "p1_arms_up":               self._rep_p1(user_lm, w, h)
-        elif pid == "p2_t_pose":              self._rep_p2(user_lm, w, h)
-        elif pid.startswith("p3"):            self._rep_rotation(p)
-        elif pid == "p4_arm_swing":           self._rep_arm_swing(user_lm, w, h)
-        elif pid == "p5_torso":               self._rep_torso(user_lm, w, h)
-        elif pid == "p6_knee":                self._rep_knee()
+        
+        if pid == "p1_raise_hold":
+            self._rep_p1(user_lm, w, h)
+        elif pid == "p2_t_pose":
+            self._rep_p2(user_lm, w, h)
+        elif pid in ["p3_right_cw", "p4_right_ccw", "p5_left_cw", "p6_left_ccw",
+                     "p7_both_cw", "p8_both_ccw"]:
+            self._rep_rotation(p)
+        elif pid == "p9_arm_swings":
+            self._rep_swings(user_lm, w, h)
+        elif pid == "p10_torso":
+            self._rep_torso(user_lm, w, h)
+        elif pid == "p11_knee":
+            self._rep_knee()
 
-    # ══════════════════════════════════════════════════════════════════
-    # HELPERS
-    # ══════════════════════════════════════════════════════════════════
-    def _arms_up_ok(self, lm, w, h):
-        """Returns (ok, error_msg). Uses normalized coords for stability."""
-        ls  = lm_px(lm,11,w,h); rs  = lm_px(lm,12,w,h)
-        le  = lm_px(lm,13,w,h); re  = lm_px(lm,14,w,h)
-        lwr = lm_px(lm,15,w,h); rwr = lm_px(lm,16,w,h)
-        nose_y = lm[0].y * h
-        if calculate_angle(ls,le,lwr) < 155: return False,"Straighten your left arm"
-        if calculate_angle(rs,re,rwr) < 155: return False,"Straighten your right arm"
-        if lwr[1] > nose_y:                  return False,"Raise left arm above your head"
-        if rwr[1] > nose_y:                  return False,"Raise right arm above your head"
-        if dist(lwr,rwr) > w*0.09:           return False,"Join both palms together"
-        return True, None
+    # ─────────────────────────────────────────────────────────────────────
+    # EXERCISE 1: RAISE ARMS + HOLD (3 reps)
+    # ─────────────────────────────────────────────────────────────────────
 
-    def _at_rest(self, lm) -> bool:
-        """
-        FIX: use normalized y coords (0-1 range) not pixel offset.
-        Arms at rest = wrists below hips in normalized coords.
-        """
-        return lm[15].y > lm[23].y and lm[16].y > lm[23].y
-
-    def _arms_mid_raise(self, lm) -> bool:
-        """Arms between rest and fully raised — user is in the process of raising."""
-        lw_y = lm[15].y; rw_y = lm[16].y
-        lh_y = lm[23].y; nose_y = lm[0].y
-        # wrists above hips but below nose = mid-raise
-        l_mid = nose_y < lw_y < lh_y
-        r_mid = nose_y < rw_y < lh_y
-        return l_mid or r_mid
-
-    # ══════════════════════════════════════════════════════════════════
-    # PHASE 1 — Arms Overhead + breath hold
-    # FIX: mid-raise = guidance (is_error=False), not an error
-    # ══════════════════════════════════════════════════════════════════
-    def _check_p1(self, lm, w, h) -> tuple:
+    def _check_p1(self, lm, w: int, h: int) -> tuple:
+        """Raise arms, hold 4 breaths, lower 2 breaths."""
+        if not visible(lm, 11, 12, 15, 16, 23, 24, 27, 28):
+            return (False, None)
+        
+        # Check leg width: not too wide, not too narrow
+        la = px(lm, 27, w, h)
+        ra = px(lm, 28, w, h)
+        leg_gap = dist(la, ra)
+        if leg_gap < w * 0.08 or leg_gap > w * 0.30:
+            return (True, "Keep legs normal width")
+        
         st = self._p1_state
-
+        
         if st == "RAISE":
-            if self._at_rest(lm):
-                # arms resting — give guidance, NOT an error (don't pause video)
-                return False, "Raise both arms overhead and join palms"
-            if self._arms_mid_raise(lm):
-                # arms on the way up — silent, let them finish
-                return False, "Keep raising..."
-            # arms are up somewhere — check form
-            ok, err = self._arms_up_ok(lm, w, h)
-            if not ok:
-                return True, err    # specific form error — is_error
-            return False, None      # perfect form, waiting for HOLD
-
+            # Arms down?
+            if lm[15].y > lm[23].y and lm[16].y > lm[23].y:
+                return (False, "Raise both hands overhead and join palms")
+            
+            # Arms raised and joined?
+            if lm[15].y < lm[0].y and lm[16].y < lm[0].y:
+                sw = shoulder_width(lm, w, h)
+                if dist(px(lm, 15, w, h), px(lm, 16, w, h)) / sw < 0.15:
+                    self._arms_raised = True
+                    return (False, None)
+            
+            if self._arms_raised:
+                return (False, "Bring palms together")
+            
+            return (False, "Raise arms and join palms")
+        
         elif st == "HOLD":
-            ok, err = self._arms_up_ok(lm, w, h)
-            if not ok:
-                # arms dropped = real error
-                return True, f"Keep arms up! {err}  ({self._p1_hold_b}/4 breaths)"
+            # Check if arms still up and joined
+            if lm[15].y > lm[0].y or lm[16].y > lm[0].y:
+                return (True, "Keep arms above head")
+            
+            sw = shoulder_width(lm, w, h)
+            if dist(px(lm, 15, w, h), px(lm, 16, w, h)) / sw > 0.20:
+                return (True, "Keep palms joined")
+            
             rem = 4 - self._p1_hold_b
-            return False, f"Hold...  {self._p1_hold_b}/4 breaths  ({rem} more)"
+            return (False, f"Hold {self._p1_hold_b}/4 breaths ({rem} more)")
+        
+        elif st == "LOWER":
+            # Arms lowered?
+            if lm[15].y < lm[23].y or lm[16].y < lm[23].y:
+                return (False, "Lower arms to rest")
+            
+            rem = 2 - self._p1_lower_b
+            return (False, f"Rest {self._p1_lower_b}/2 breaths ({rem} more)")
+        
+        return (False, None)
 
-        elif st == "REST":
-            if not self._at_rest(lm):
-                return True, f"Lower arms to rest  ({self._p1_rest_b}/2 breaths)"
-            rem = 2 - self._p1_rest_b
-            return False, f"Rest...  {self._p1_rest_b}/2 breaths  ({rem} more)"
-
-        return False, None
-
-    def _rep_p1(self, lm, w, h):
+    def _rep_p1(self, lm, w: int, h: int):
+        """Count breaths and state transitions."""
         st = self._p1_state
+        
         if st == "RAISE":
-            ok, _ = self._arms_up_ok(lm, w, h)
-            if ok:
-                self._p1_state  = "HOLD"
-                self._p1_hold_b = 0
-                self._breath.reset()
+            if lm[15].y < lm[0].y and lm[16].y < lm[0].y:
+                sw = shoulder_width(lm, w, h)
+                if dist(px(lm, 15, w, h), px(lm, 16, w, h)) / sw < 0.15:
+                    self._p1_state = "HOLD"
+                    self._breath.reset()
+        
         elif st == "HOLD":
             self._p1_hold_b += self._breath.new_breaths()
             if self._p1_hold_b >= 4:
-                self._p1_state  = "REST"
-                self._p1_rest_b = 0
+                self._p1_state = "LOWER"
                 self._breath.reset()
-        elif st == "REST":
-            if self._at_rest(lm):
-                self._p1_rest_b += self._breath.new_breaths()
-                if self._p1_rest_b >= 2:
+        
+        elif st == "LOWER":
+            if lm[15].y > lm[23].y and lm[16].y > lm[23].y:
+                self._p1_lower_b += self._breath.new_breaths()
+                if self._p1_lower_b >= 2:
                     self._p1_state = "RAISE"
+                    self._arms_raised = False
                     self.rep_count += 1
 
-    # ══════════════════════════════════════════════════════════════════
-    # PHASE 2 — T-Pose Breathe
-    # ══════════════════════════════════════════════════════════════════
-    def _check_p2(self, lm, w, h) -> tuple:
-        ls  = lm_px(lm,11,w,h); rs  = lm_px(lm,12,w,h)
-        le  = lm_px(lm,13,w,h); re  = lm_px(lm,14,w,h)
-        lwr = lm_px(lm,15,w,h); rwr = lm_px(lm,16,w,h)
+    # ─────────────────────────────────────────────────────────────────────
+    # EXERCISE 2: T-POSE BREATHE (5 reps)
+    # ─────────────────────────────────────────────────────────────────────
 
-        # arms below hips — need to raise
-        if lm[15].y > lm[23].y and lm[16].y > lm[23].y:
-            return False, "Raise arms to shoulder level to begin"
+    def _check_p2(self, lm, w: int, h: int) -> tuple:
+        """T→Forward→T = 1 rep."""
+        if not visible(lm, 11, 12, 13, 14, 15, 16):
+            return (False, None)
+        
+        lwr = px(lm, 15, w, h)
+        rwr = px(lm, 16, w, h)
+        ls = px(lm, 11, w, h)
+        rs = px(lm, 12, w, h)
+        le = px(lm, 13, w, h)
+        re = px(lm, 14, w, h)
+        
+        # Arm angles
+        l_angle = angle(ls, le, lwr)
+        r_angle = angle(rs, re, rwr)
+        
+        if l_angle < 150:
+            return (True, "Keep left arm straight")
+        if r_angle < 150:
+            return (True, "Keep right arm straight")
+        
+        # Shoulder height
+        if abs(lm[15].y - lm[11].y) > 0.15:
+            return (True, "Bring left arm to shoulder height")
+        if abs(lm[16].y - lm[12].y) > 0.15:
+            return (True, "Bring right arm to shoulder height")
+        
+        sw = shoulder_width(lm, w, h)
+        gap = dist(lwr, rwr) / sw
+        
+        st = self._p2_state
+        
+        if st == "T_POS":
+            if gap > 1.8:
+                return (False, "Breathe in - keep arms wide (T)")
+            return (False, "Move arms wider to T-position")
+        else:  # FORWARD
+            if gap < 0.30:
+                return (False, "Breathe out - bring hands together forward")
+            return (False, "Bring hands closer together")
 
-        if calculate_angle(ls,le,lwr) < 150: return True,"Keep left arm straight"
-        if calculate_angle(rs,re,rwr) < 150: return True,"Keep right arm straight"
+    def _rep_p2(self, lm, w: int, h: int):
+        """T→Forward transitions."""
+        lwr = px(lm, 15, w, h)
+        rwr = px(lm, 16, w, h)
+        sw = shoulder_width(lm, w, h)
+        gap = dist(lwr, rwr) / sw
+        
+        st = self._p2_state
+        
+        if st == "T_POS":
+            if gap > 1.8:
+                self._p2_state = "FORWARD"
+        elif st == "FORWARD":
+            if gap < 0.30:
+                self._p2_forward_once = True
+            if self._p2_forward_once and gap > 1.8:
+                self._p2_state = "T_POS"
+                self.rep_count += 1
 
-        tol = 0.10  # 10% of frame height in normalized
-        if lm[15].y < lm[11].y - tol: return True,"Lower left arm to shoulder level"
-        if lm[15].y > lm[11].y + tol: return True,"Raise left arm to shoulder level"
-        if lm[16].y < lm[12].y - tol: return True,"Lower right arm to shoulder level"
-        if lm[16].y > lm[12].y + tol: return True,"Raise right arm to shoulder level"
+    # ─────────────────────────────────────────────────────────────────────
+    # EXERCISES 3-8: WRIST ROTATIONS (5 reps each)
+    # ─────────────────────────────────────────────────────────────────────
 
-        wd = dist(lwr, rwr)
-        if self._p2_sub == "CLOSE":
-            return False, "Inhale — spread arms wide to the sides"
-        else:
-            if wd > w*0.45:
-                return False, "Exhale — bring palms together in front"
-            return False, None
-
-    def _rep_p2(self, lm, w, h):
-        if lm[15].y > lm[23].y: return
-        lwr = lm_px(lm,15,w,h); rwr = lm_px(lm,16,w,h)
-        wd  = dist(lwr, rwr)
-        if wd > w*0.45 and self._p2_sub == "CLOSE": self._p2_sub = "WIDE"
-        if wd < w*0.15 and self._p2_sub == "WIDE":
-            self._p2_sub = "CLOSE"
-            self.rep_count += 1
-
-    # ══════════════════════════════════════════════════════════════════
-    # PHASE 3 — Wrist Rotations
-    # FIX: removed wrong height guard. Check arm is extended (elbow angle)
-    # and wrist is not resting at hip.
-    # ══════════════════════════════════════════════════════════════════
-    def _check_rotation(self, lm, w, h, phase) -> tuple:
-        side = phase.get("side","right")
+    def _check_rotation(self, lm, w: int, h: int, phase: dict) -> tuple:
+        """Wrist rotations - clockwise and counter-clockwise."""
+        side = phase.get("side", "right")
         done = self.rep_count
-        tgt  = phase.get("target",5)
-
-        if side in ("right","both"):
-            rs  = lm_px(lm,12,w,h); re  = lm_px(lm,14,w,h); rwr = lm_px(lm,16,w,h)
-            rh  = lm_px(lm,24,w,h)
-            # arm resting = wrist near hip level, skip
-            arm_active = dist(rwr, rh) > w * 0.15
-            if arm_active:
-                ang = calculate_angle(rs,re,rwr)
-                if ang < 90:
-                    return True, "Extend your right arm more"
+        
+        if side in ("right", "both"):
+            if visible(lm, 12, 14, 16):
+                rs = px(lm, 12, w, h)
+                re = px(lm, 14, w, h)
+                rwr = px(lm, 16, w, h)
+                rh = px(lm, 24, w, h)
+                
+                sw = shoulder_width(lm, w, h)
+                if dist(rwr, rh) / sw < 0.20:
+                    return (True, "Extend right arm more")
+                
+                if angle(rs, re, rwr) < 90:
+                    return (True, "Straighten right arm")
+                
                 if not self._tw_r.is_moving():
-                    return True, f"Rotate right hand in circles  {done}/{tgt}"
-
-        if side in ("left","both"):
-            ls  = lm_px(lm,11,w,h); le  = lm_px(lm,13,w,h); lwr = lm_px(lm,15,w,h)
-            lh  = lm_px(lm,23,w,h)
-            arm_active = dist(lwr, lh) > w * 0.15
-            if arm_active:
-                ang = calculate_angle(ls,le,lwr)
-                if ang < 90:
-                    return True, "Extend your left arm more"
+                    return (False, f"Rotate right hand {done}/5")
+        
+        if side in ("left", "both"):
+            if visible(lm, 11, 13, 15):
+                ls = px(lm, 11, w, h)
+                le = px(lm, 13, w, h)
+                lwr = px(lm, 15, w, h)
+                lh = px(lm, 23, w, h)
+                
+                sw = shoulder_width(lm, w, h)
+                if dist(lwr, lh) / sw < 0.20:
+                    return (True, "Extend left arm more")
+                
+                if angle(ls, le, lwr) < 90:
+                    return (True, "Straighten left arm")
+                
                 if not self._tw_l.is_moving():
-                    return True, f"Rotate left hand in circles  {done}/{tgt}"
-
-        if side == "knees":
-            if not self._tk_l.is_moving() and not self._tk_r.is_moving():
-                return True, f"Rotate knees in circles  {done}/{tgt}"
-
-        return False, f"Rotating...  {done}/{tgt}"
+                    return (False, f"Rotate left hand {done}/5")
+        
+        return (False, f"Good form {done}/5")
 
     def _rep_rotation(self, phase):
-        side = phase.get("side","right")
-        if side in ("right","both"):
-            c = self._tw_r.cycle_count(); n = c - self._last_cyc_r
-            if n > 0: self.rep_count += n; self._last_cyc_r = c
-        if side == "left":
-            c = self._tw_l.cycle_count(); n = c - self._last_cyc_l
-            if n > 0: self.rep_count += n; self._last_cyc_l = c
-        if side == "knees":
-            c = self._tk_l.cycle_count(); n = c - self._last_cyc_k
-            if n > 0: self.rep_count += n; self._last_cyc_k = c
+        """Count rotation cycles."""
+        side = phase.get("side", "right")
+        
+        if side == "right":
+            c = self._tw_r.cycle_count()
+            n = c - self._last_cyc_r
+            if n > 0:
+                self.rep_count += n
+                self._last_cyc_r = c
+        elif side == "left":
+            c = self._tw_l.cycle_count()
+            n = c - self._last_cyc_l
+            if n > 0:
+                self.rep_count += n
+                self._last_cyc_l = c
+        elif side == "both":
+            cr = self._tw_r.cycle_count()
+            cl = self._tw_l.cycle_count()
+            nr = cr - self._last_cyc_r
+            nl = cl - self._last_cyc_l
+            reps = max(nr, nl)
+            if reps > 0:
+                self.rep_count += reps
+                self._last_cyc_r = cr
+                self._last_cyc_l = cl
 
-    # ══════════════════════════════════════════════════════════════════
-    # PHASE 4 — Arm Swing
-    # ══════════════════════════════════════════════════════════════════
-    def _check_arm_swing(self, lm, w, h) -> tuple:
-        if abs(lm[27].y - lm[28].y) < 0.04:
-            return True, "Step one foot forward first"
-        if not self._tw_l.is_moving() and not self._tw_r.is_moving():
-            return True, f"Swing arms in big circles  {self.rep_count}/10"
-        return False, f"Swinging...  {self.rep_count}/10"
+    # ─────────────────────────────────────────────────────────────────────
+    # EXERCISE 9: ARM SWINGS (10 total: 5 CW + 5 CCW)
+    # ─────────────────────────────────────────────────────────────────────
 
-    def _rep_arm_swing(self, lm, w, h):
-        lw_y = lm[15].y; ls_y = lm[11].y
-        up   = lw_y < ls_y - 0.05
-        if up and self._arm_swing_ph == "DOWN":   self._arm_swing_ph = "UP"
-        if not up and self._arm_swing_ph == "UP":
-            self._arm_swing_ph = "DOWN"; self.rep_count += 1
-
-    # ══════════════════════════════════════════════════════════════════
-    # PHASE 5 — Torso Rotation
-    # ══════════════════════════════════════════════════════════════════
-    def _check_torso(self, lm, w, h) -> tuple:
-        ls  = lm_px(lm,11,w,h); rs  = lm_px(lm,12,w,h)
-        la  = lm_px(lm,27,w,h); ra  = lm_px(lm,28,w,h)
-        lwr = lm_px(lm,15,w,h); rwr = lm_px(lm,16,w,h)
-        sw  = dist(ls,rs) or 1
-        ratio = dist(la,ra)/sw
-        if ratio < 0.10: return True,"Place feet 8 inches apart"
-        if ratio > 0.65: return True,"Feet too wide — 8 inches only"
-        if lm[15].y > lm[11].y + 0.10 and lm[16].y > lm[12].y + 0.10:
-            return True,"Raise arms to shoulder level and touch thumbs"
-        if not self._ts_l.is_moving():
-            return True, f"Rotate upper body left and right  {self.rep_count}/5"
-        return False, f"Rotating...  {self.rep_count}/5"
-
-    def _rep_torso(self, lm, w, h):
-        ls_x = lm[11].x*w; rs_x = lm[12].x*w; sw = abs(ls_x-rs_x)
-        if self._sw_baseline is None: self._sw_baseline = sw; return
-        rotated = sw < self._sw_baseline * 0.82
-        if rotated and self._torso_ph == "CENTER":   self._torso_ph = "ROTATED"
-        if not rotated and self._torso_ph == "ROTATED":
-            self._torso_ph = "CENTER"; self.rep_count += 1
-
-    # ══════════════════════════════════════════════════════════════════
-    # PHASE 6 — Knee Rotation
-    # ══════════════════════════════════════════════════════════════════
-    def _check_knee(self, lm, w, h) -> tuple:
-        lk  = lm_px(lm,25,w,h); rk  = lm_px(lm,26,w,h)
-        lwr = lm_px(lm,15,w,h); rwr = lm_px(lm,16,w,h)
-        lh  = lm_px(lm,23,w,h)
-        la  = lm_px(lm,27,w,h); ra  = lm_px(lm,28,w,h)
+    def _check_swings(self, lm, w: int, h: int) -> tuple:
+        """Right leg forward, swing arms."""
+        if not visible(lm, 11, 12, 15, 16, 27, 28):
+            return (False, None)
+        
+        # Right leg forward?
+        if abs(lm[27].y - lm[28].y) < 0.03:
+            return (False, "Step right leg forward")
+        
         done = self.rep_count
+        
+        if not self._tw_l.is_moving() and not self._tw_r.is_moving():
+            return (False, f"Swing arms {done}/10")
+        
+        return (False, f"Swinging {done}/10")
 
-        if dist(lk,rk) > w*0.13:             return True,"Bring knees together"
-        if dist(la,ra) > w*0.15:             return True,"Place feet only 3 inches apart"
-        km_y = (lk[1]+rk[1])/2
-        wm_y = (lwr[1]+rwr[1])/2
-        if abs(wm_y-km_y) > h*0.15:         return True,"Place both hands on your knees"
-        if calculate_angle(lh,lk,la) > 168: return True,"Bend your knees slightly"
+    def _rep_swings(self, lm, w: int, h: int):
+        """Count swings (down position = 1 rep)."""
+        lw_y = lm[15].y
+        rw_y = lm[16].y
+        ls_y = lm[11].y
+        
+        # Down when hands below shoulders
+        is_down = lw_y > ls_y + 0.20 or rw_y > ls_y + 0.20
+        
+        if is_down and not self._arms_down:
+            self._arms_down = True
+            self.rep_count += 1
+        elif not is_down:
+            self._arms_down = False
 
+    # ─────────────────────────────────────────────────────────────────────
+    # EXERCISE 10: TORSO ROTATION (3 reps)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _check_torso(self, lm, w: int, h: int) -> tuple:
+        """Thumbs touching, shoulder level, rotate."""
+        if not visible(lm, 11, 12, 15, 16):
+            return (False, None)
+        
+        lwr = px(lm, 15, w, h)
+        rwr = px(lm, 16, w, h)
+        
+        # Thumbs distance
+        thumb_dist = dist(lwr, rwr)
+        if thumb_dist > 40:
+            return (False, "Bring thumbs closer")
+        
+        # Shoulder height
+        if abs(lm[15].y - lm[11].y) > 0.15:
+            return (True, "Raise arms to shoulder height")
+        
+        if not self._ts_l.is_moving():
+            return (False, f"Rotate torso {self.rep_count}/3")
+        
+        return (False, f"Rotating {self.rep_count}/3")
+
+    def _rep_torso(self, lm, w: int, h: int):
+        """Count torso rotations (shoulder gap change)."""
+        ls_x = lm[11].x
+        rs_x = lm[12].x
+        gap = abs(ls_x - rs_x)
+        
+        if self._torso_baseline_gap is None:
+            self._torso_baseline_gap = gap
+        
+        # Rotated when gap < 85% of baseline
+        is_rotated = gap < self._torso_baseline_gap * 0.85
+        
+        if is_rotated and not self._torso_rotated:
+            self._torso_rotated = True
+        elif not is_rotated and self._torso_rotated:
+            self._torso_rotated = False
+            self.rep_count += 1
+
+    # ─────────────────────────────────────────────────────────────────────
+    # EXERCISE 11: KNEE ROTATION (3 reps)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _check_knee(self, lm, w: int, h: int) -> tuple:
+        """Hands on knees, rotate."""
+        if not visible(lm, 23, 24, 25, 26, 27, 28, 15, 16):
+            return (False, None)
+        
+        lk = px(lm, 25, w, h)
+        rk = px(lm, 26, w, h)
+        lwr = px(lm, 15, w, h)
+        rwr = px(lm, 16, w, h)
+        
+        # Hands on knees?
+        if dist(lwr, lk) > 100 or dist(rwr, rk) > 100:
+            return (False, "Place hands on knees")
+        
+        done = self.rep_count
+        
         if not self._tk_l.is_moving() and not self._tk_r.is_moving():
-            if done < 3:   return True, f"Rotate knees clockwise  {done}/3"
-            elif done < 6: return True, f"Anti-clockwise now  {done-3}/3"
-            else:          return True, f"Clockwise again  {done-6}/3"
-
-        if done < 3:   return False, f"Clockwise  {done}/3"
-        elif done < 6: return False, f"Anti-clockwise  {done-3}/3"
-        else:          return False, f"Clockwise  {done-6}/3"
+            return (False, f"Rotate knees {done}/3")
+        
+        return (False, f"Rotating {done}/3")
 
     def _rep_knee(self):
-        c = self._tk_l.cycle_count(); n = c - self._last_cyc_k
-        if n > 0: self.rep_count += n; self._last_cyc_k = c
+        """Count knee rotations."""
+        c = self._tk_l.cycle_count()
+        n = c - self._last_cyc_k
+        if n > 0:
+            self.rep_count += n
+            self._last_cyc_k = c
