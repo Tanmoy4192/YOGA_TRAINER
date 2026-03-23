@@ -1,320 +1,265 @@
 """
 core/base_controller.py — BaseController abstract class
 
-Implements the THREE JOBS of a real AI coach:
-  JOB 1 (WATCH)   — Show mentor video, user observes
+THREE JOBS of the AI coach:
+  JOB 1 (WATCH)   — Show mentor video, user observes ("Watch Carefully")
   JOB 2 (ACTIVE)  — User performs, coach evaluates form
-  JOB 3 (HOLD)    — If phase ends before reps complete, freeze video up to 10s
+  JOB 3 (HOLD)    — Phase ended before 10s window, video frozen
+                     After 10s ALWAYS moves on regardless of rep count.
 
-State machine: WATCH → PREPARE → ACTIVE → [HOLD if needed] → next phase
-             ↑ (zoom phases skip to WATCH directly)
+State machine: WATCH → PREPARE → ACTIVE → HOLD (if needed) → next phase
 
-Each exercise subclasses BaseController and implements:
-  - phases() → list of phase dicts
-  - check_pose(user_lm, w, h, phase) → (is_error, message | None)
-  - detect_rep(user_lm, w, h) → increment rep_count
-  - on_phase_change(phase) → optional: reset state machines
+FIXES:
+  - HOLD timer now fires ONCE per phase-end, does not repeat
+  - After HOLD_MAX_SEC elapses, state transitions to WATCH permanently
+  - _end_hold_start is cleared correctly on every phase change
+  - hold_remaining exposed to renderer for countdown display
 """
 import time
 from abc import ABC, abstractmethod
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
-
-VISIBILITY_MIN = 0.55  # MediaPipe visibility threshold
-ERROR_THRESHOLD = 12  # frames of sustained error to trigger pause
-PREPARE_LEAD_SEC = 3.0  # seconds before ACTIVE to show PREPARE
-HOLD_MAX_SEC = 10.0  # hard cap on HOLD state duration
+VISIBILITY_MIN   = 0.55
+ERROR_THRESHOLD  = 12
+PREPARE_LEAD_SEC = 3.0
+HOLD_MAX_SEC     = 10.0   # wait 10s then move on no matter what
 
 
 class CoachState:
-    """State constants for the coach state machine."""
-    WATCH = "WATCH"
+    WATCH   = "WATCH"
     PREPARE = "PREPARE"
-    ACTIVE = "ACTIVE"
-    ZOOM = "ZOOM"
-    HOLD = "HOLD"
+    ACTIVE  = "ACTIVE"
+    ZOOM    = "ZOOM"
+    HOLD    = "HOLD"
 
 
 class BaseController(ABC):
-    """
-    Abstract base class for all exercises.
-    Implements state machine and shared coaching logic.
-    """
 
     def __init__(self):
-        """Initialize controller state."""
-        self.rep_count = 0
-        self.error_frames = 0
-        self.good_frames = 0
-        self._coach_state = CoachState.WATCH
-        self._active_phase = None
-        self._video_pos = 0.0
-        self._end_hold_start = None  # timestamp when HOLD phase began
+        self.rep_count        = 0
+        self.error_frames     = 0
+        self.good_frames      = 0
+        self._coach_state     = CoachState.WATCH
+        self._active_phase    = None
+        self._video_pos       = 0.0
+        self._end_hold_start  = None   # wall-clock when HOLD started
+        self._hold_remaining  = 0.0
+        # Track which phase ids have already had their HOLD consumed
+        self._hold_done_phases = set()
 
     def reset_session(self):
-        """Reset counters when exercise switches."""
-        self.rep_count = 0
-        self.error_frames = 0
-        self.good_frames = 0
-        self._end_hold_start = None
+        self.rep_count         = 0
+        self.error_frames      = 0
+        self.good_frames       = 0
+        self._end_hold_start   = None
+        self._hold_remaining   = 0.0
+        self._hold_done_phases = set()
 
     def update(self, video_pos: float, user_lm, w: int, h: int) -> tuple:
         """
-        Main evaluation loop.
-        Called every frame with user landmarks.
-
-        Args:
-            video_pos: current video time in seconds
-            user_lm: MediaPipe landmarks or None
-            w, h: frame dimensions
-
-        Returns:
-            (correct: bool, message: str, should_pause: bool)
-            - correct: True = green skeleton, False = red skeleton
-            - message: plain English coaching feedback
-            - should_pause: True = freeze video this frame
+        Main evaluation loop — called every frame.
+        Returns: (correct, message, should_pause, hold_remaining)
         """
         self._video_pos = video_pos
-        phase = self._get_phase(video_pos)
 
+        # _get_phase returns None in gaps between phases (pos >= end).
+        # Fall back to _active_phase so HOLD/rep-count keep working.
+        phase_now = self._get_phase(video_pos)
+        if phase_now is not None:
+            if phase_now.get("id") != (self._active_phase or {}).get("id"):
+                self._on_phase_change(phase_now)
+                self._active_phase = phase_now
+
+        phase = self._active_phase
         if phase is None:
-            return True, "Follow the mentor...", False
+            return True, "Follow the mentor...", False, 0.0
 
-        # ─── PHASE CHANGE DETECTION ──────────────────────────────────────
-        if phase.get("id") != (self._active_phase or {}).get("id"):
-            self._on_phase_change(phase)
-            self._active_phase = phase
+        # If we are in a true inter-phase gap (no current phase and
+        # the last known phase has ended) return neutral WATCH so
+        # no stale watch_msg / HOLD / corrections bleed through.
+        in_gap = (phase_now is None) and (
+            video_pos >= phase.get("end", float("inf"))
+        )
+        if in_gap:
+            self._coach_state = CoachState.WATCH
+            return True, "", False, 0.0
 
-        # ─── COMPUTE STATE ───────────────────────────────────────────────
         state = self._compute_state(video_pos, phase)
         self._coach_state = state
 
-        # ─── HANDLE EACH STATE ───────────────────────────────────────────
+        def _ret(correct, msg, pause):
+            return correct, msg, pause, self._hold_remaining
 
-        # ZOOM state: skip evaluation, just watch
+        # ── ZOOM ─────────────────────────────────────────────────────────
         if state == CoachState.ZOOM:
-            return True, "Watch closely — observe every detail", False
+            return _ret(True, "Watch closely — observe every detail", False)
 
-        # WATCH state: mentor video, no evaluation
+        # ── WATCH ─────────────────────────────────────────────────────────
         if state == CoachState.WATCH:
             msg = phase.get("watch_msg", "Watch the mentor")
-            return True, f"👁  {msg}", False
+            return _ret(True, msg, False)
 
-        # PREPARE state: countdown to active
+        # ── PREPARE ──────────────────────────────────────────────────────
         if state == CoachState.PREPARE:
             secs = max(0, phase["active"] - video_pos)
-            return True, f"Get ready — {phase.get('name', '')} starts in {secs:.0f}s", False
+            msg  = phase.get("watch_msg", "Get ready")
+            return _ret(True, f"{msg} — starting in {secs:.0f}s", False)
 
-        # HOLD state: user hasn't completed reps, hold position
+        # ── HOLD ─────────────────────────────────────────────────────────
         if state == CoachState.HOLD:
-            if self._end_hold_start is None:
-                self._end_hold_start = time.time()
+            elapsed   = time.time() - self._end_hold_start
+            remaining = max(0.0, HOLD_MAX_SEC - elapsed)
+            self._hold_remaining = remaining
 
-            elapsed = time.time() - self._end_hold_start
-            remaining = max(0, HOLD_MAX_SEC - elapsed)
-            done = self.rep_count
+            done   = self.rep_count
             target = phase.get("target", 0)
-            rem = max(0, target - done)
+            rem    = max(0, target - done)
+            msg    = f"Complete {rem} more rep(s)  ({done}/{target})"
+            return _ret(True, msg, True)
 
-            msg = (
-                f"Complete {rem} more rep(s) ({done}/{target}) — "
-                f"resuming in {remaining:.0f}s"
-            )
-            return True, msg, True  # pause video during HOLD
+        # ── ACTIVE ────────────────────────────────────────────────────────
+        self._hold_remaining = 0.0
 
-        # ─── ACTIVE STATE: EVALUATE USER FORM ────────────────────────────
         if user_lm is None:
-            return False, "Step into the camera view", True
+            return _ret(False, "Step into the camera view", True)
 
-        # Call exercise's check_pose() method
         is_error, message = self.check_pose(user_lm, w, h, phase)
-
-        # Update rep counter
         self.detect_rep(user_lm, w, h)
 
-        # ─── ERROR STREAK LOGIC ──────────────────────────────────────────
         if is_error:
             self.error_frames += 1
-            self.good_frames = 0
-
+            self.good_frames   = 0
             if self.error_frames >= ERROR_THRESHOLD:
-                # 12+ consecutive error frames = hard pause
-                return False, message, True
+                return _ret(False, message, True)
+            return _ret(True, message, False)
 
-            # Soft warning: show message but don't pause yet
-            return True, message, False
+        self.error_frames = 0
+        self.good_frames += 1
 
-        # ─── GOOD FORM ───────────────────────────────────────────────────
-        else:
-            self.error_frames = 0
-            self.good_frames += 1
+        if message:
+            return _ret(True, message, False)
 
-            if message:
-                # Guidance message (not an error, but informative)
-                return True, message, False
+        done   = self.rep_count
+        target = phase.get("target", 0)
+        if target > 0:
+            if done >= target:
+                return _ret(True, f"All {target} done — great work!", False)
+            return _ret(True, f"Good form  {done} / {target}", False)
 
-            # Pure positive feedback
-            done = self.rep_count
-            target = phase.get("target", 0)
-
-            if target > 0:
-                if done >= target:
-                    return True, f"✅ All {target} done — great work!", False
-                return True, f"Good form  {done} / {target}", False
-
-            return True, "Good form — keep going", False
+        return _ret(True, "Good form — keep going", False)
 
     def _compute_state(self, video_pos: float, phase: dict) -> str:
         """
-        Strict state machine implementation.
-        
-        Exact logic flow:
-        1. ZOOM phase (watch only, no evaluation)
-        2. Phase ended? Check HOLD condition
-        3. Active phase? Return ACTIVE
-        4. Prepare phase (3s before active)? Return PREPARE
-        5. Default: WATCH
-        
-        Final states: WATCH, PREPARE, ACTIVE, ZOOM, HOLD
-        
-        HOLD State:
-        - Triggered when phase ends AND reps < target
-        - Freezes video for max 10 seconds
-        - Shows countdown timer
-        - Auto-transitions to WATCH when time expires or phase changes
+        State machine:
+          ZOOM > HOLD (once per phase, for 10s max) > ACTIVE > PREPARE > WATCH
+
+        KEY FIX: HOLD only fires once per phase. After HOLD_MAX_SEC elapses
+        the phase id is added to _hold_done_phases and state becomes WATCH.
+        This prevents the 10-second timer from repeating.
         """
-        
-        # STATE 1: ZOOM phase (observe only, no evaluation)
         if phase.get("zoom"):
-            # Reset HOLD on zoom phase
-            if self._end_hold_start is not None:
-                self._end_hold_start = None
+            self._end_hold_start = None
+            self._hold_remaining = 0.0
             return CoachState.ZOOM
-        
-        # Extract timing boundaries
+
+        pid         = phase.get("id", "")
         active_time = phase.get("active", phase["start"])
-        end_time = phase.get("end", float("inf"))
-        
-        # STATE 5: Check HOLD condition first (highest priority after ZOOM)
-        # HOLD is triggered when phase ends AND reps incomplete
+        end_time    = phase.get("end", float("inf"))
+
+        # ── Past end of phase ─────────────────────────────────────────────
         if video_pos >= end_time:
-            rep_count = self.rep_count
+            # Has this phase's HOLD already been consumed?
+            if pid in self._hold_done_phases:
+                self._hold_remaining = 0.0
+                return CoachState.WATCH
+
             target = phase.get("target", 0)
-            
-            # HOLD logic: only if target exists AND reps incomplete
-            if target > 0 and rep_count < target:
-                # First time entering HOLD?
+            if target > 0 and self.rep_count < target:
+                # Start HOLD timer if not already started
                 if self._end_hold_start is None:
                     self._end_hold_start = time.time()
-                
-                # Check HOLD time limit (MUST NOT exceed 10s)
+
                 elapsed = time.time() - self._end_hold_start
+                self._hold_remaining = max(0.0, HOLD_MAX_SEC - elapsed)
+
                 if elapsed < HOLD_MAX_SEC:
-                    # HOLD state (max 10 seconds)
                     return CoachState.HOLD
-                else:
-                    # HOLD time expired - move to WATCH
-                    self._end_hold_start = None
-                    return CoachState.WATCH
-            
-            # Reps complete or no target - go to WATCH
+
+            # HOLD expired (or no reps needed) — mark done, never HOLD again
+            self._hold_done_phases.add(pid)
             self._end_hold_start = None
+            self._hold_remaining = 0.0
             return CoachState.WATCH
-        
-        # STATE 3: ACTIVE phase (video reached active time)
+
+        # ── Reset hold state whenever we're back inside the phase ─────────
+        if self._end_hold_start is not None and video_pos < end_time:
+            self._end_hold_start = None
+            self._hold_remaining = 0.0
+
+        # ── ACTIVE ────────────────────────────────────────────────────────
         if video_pos >= active_time:
-            # Reset HOLD timer when in ACTIVE
-            if self._end_hold_start is not None:
-                self._end_hold_start = None
+            self._hold_remaining = 0.0
             return CoachState.ACTIVE
-        
-        # STATE 2: PREPARE phase (3 seconds before active)
+
+        # ── PREPARE (3s lead-in) ──────────────────────────────────────────
         if video_pos >= active_time - PREPARE_LEAD_SEC:
-            # Reset HOLD timer when in PREPARE
-            if self._end_hold_start is not None:
-                self._end_hold_start = None
+            self._hold_remaining = 0.0
             return CoachState.PREPARE
-        
-        # STATE 4: WATCH (default, preamble phase)
-        self._end_hold_start = None
+
+        # ── WATCH ─────────────────────────────────────────────────────────
+        self._hold_remaining = 0.0
         return CoachState.WATCH
 
     def _get_phase(self, pos: float):
-        """Get the phase active at video position."""
+        """
+        Return the active phase for this video position.
+        Returns None if pos is before the first phase OR in a gap between phases
+        (i.e. pos >= last matched phase's 'end').
+        """
         current = None
         for p in self.phases():
             if pos >= p["start"]:
                 current = p
+        # If we found a phase but have passed its end, we're in a gap — no phase
+        if current is not None:
+            end = current.get("end", float("inf"))
+            if pos >= end:
+                return None
         return current
 
     def _on_phase_change(self, phase: dict):
-        """Called when transitioning to a new phase."""
-        self.rep_count = 0
-        self.error_frames = 0
-        self.good_frames = 0
+        """Called when phase changes. Resets counters but preserves hold_done set."""
+        self.rep_count       = 0
+        self.error_frames    = 0
+        self.good_frames     = 0
         self._end_hold_start = None
-        # Allow subclass to reset state machines
+        self._hold_remaining = 0.0
+        # NOTE: we do NOT clear _hold_done_phases here — it persists for the
+        # lifetime of the session so a phase's HOLD is never replayed.
         self.on_phase_change(phase)
 
-    # ─────────────────────────────────────────────────────────────────────
-    # ABSTRACT METHODS (implemented by exercise subclasses)
-    # ─────────────────────────────────────────────────────────────────────
+    # ── Abstract interface ────────────────────────────────────────────────────
 
     @abstractmethod
-    def phases(self) -> list:
-        """
-        Return list of phase dicts. Each phase must have:
-          id (str), name (str), start (float), active (float), end (float),
-          target (int), watch_msg (str), check_landmarks (list)
-        Optional: zoom (bool), side (str)
-        """
-        ...
+    def phases(self) -> list: ...
 
     @abstractmethod
-    def check_pose(self, user_lm, w: int, h: int, phase: dict) -> tuple:
-        """
-        Evaluate user's form in current phase.
+    def check_pose(self, user_lm, w: int, h: int, phase: dict) -> tuple: ...
 
-        Args:
-            user_lm: MediaPipe landmarks
-            w, h: frame dimensions
-            phase: current phase dict
+    def detect_rep(self, user_lm, w: int, h: int): pass
 
-        Returns:
-            (is_error: bool, message: str | None)
-            - is_error=False: guidance/soft warning (no pause)
-            - is_error=True: hard error (triggers pause after 12 frames)
-            - message: None if all is good, str if guidance/error needed
-        """
-        ...
+    def on_phase_change(self, phase: dict): pass
 
-    def detect_rep(self, user_lm, w: int, h: int):
-        """
-        Optional: detect and count completed reps.
-        Default does nothing. Override in subclass to count reps.
-        """
-        pass
-
-    def on_phase_change(self, phase: dict):
-        """
-        Optional: called when phase changes.
-        Use to reset state machines specific to your exercise.
-        """
-        pass
-
-    # ─────────────────────────────────────────────────────────────────────
-    # PROPERTIES FOR SUBCLASSES
-    # ─────────────────────────────────────────────────────────────────────
+    # ── Properties ───────────────────────────────────────────────────────────
 
     @property
     def current_phase_name(self) -> str:
-        """Get name of current phase for UI display."""
         p = self._get_phase(self._video_pos)
         return p["name"] if p else "Exercise"
 
     @property
     def coach_state(self) -> str:
-        """Get current coach state for UI display."""
         return self._coach_state
+
+    @property
+    def hold_remaining(self) -> float:
+        return self._hold_remaining
