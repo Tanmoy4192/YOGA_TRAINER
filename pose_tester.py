@@ -1,415 +1,386 @@
 """
-pose_test.py — SKY Yoga Exercise Tester
-========================================
-Tests a single exercise in isolation with the reference video.
+pose_tester.py — SKY Yoga AI Coach · Exercise Tester
 
-USAGE
------
-  # Test exercise by key (seeks video to that exercise's active timestamp)
-  python pose_test.py --exercise hand
-  python pose_test.py --exercise hand --phase p2_t_pose
-  python pose_test.py --exercise hand --phase p2_t_pose --seek 160
+Run and test a specific exercise WITHOUT the full video stream.
+Identical UI output to main.py (same render pipeline, same skeleton,
+same rep counter, same coach messages, same HOLD overlay).
 
-  # Override video source
-  python pose_test.py --exercise hand --video /path/to/local.mp4
+Usage:
+    python pose_tester.py                    # interactive menu — pick exercise
+    python pose_tester.py hand               # jump straight to hand exercise
+    python pose_tester.py hand p10_knee_cw   # jump to a specific phase
 
-CONTROLS (keyboard)
--------------------
-  SPACE       pause / resume reference video
-  N           jump to NEXT phase in this exercise
-  P           jump to PREV phase in this exercise
-  R           reset rep counter and state for current phase
-  +  /  =     seek forward  +5 seconds
-  -           seek backward -5 seconds
-  D           toggle debug overlay (raw landmark values)
-  Q / ESC     quit
+Controls:
+    [SPACE]     — pause / resume the simulated video clock
+    [N]         — skip to next phase
+    [P]         — go back to previous phase
+    [R]         — reset current phase (rep count + state)
+    [Q] / [ESC] — quit
 
-DISPLAY (reference video side)
--------------------------------
-  Top-left   : current phase name  |  coach state pill
-  Below       : WATCH CAREFULLY banner (during WATCH/PREPARE)
-  Left side   : rep counter  X / Y
-  Bottom bar  : coach feedback message (green = correct, red = error)
-  Top-right   : video timestamp  |  FPS
-  Debug panel : raw landmark positions, state machine internals (toggle D)
+How the fake video clock works:
+    There is no reference video file needed.
+    A wall-clock timer drives `video_pos` exactly as ReferenceVideo.position_seconds()
+    does in production.  The controller receives the same (video_pos, landmarks, w, h)
+    tuple every frame, so all state-machine logic runs identically.
 
-DISPLAY (user camera side)
---------------------------
-  Skeleton drawn green (good form) or red (error)
-  Phase state shown top-left
+    The tester starts the clock at the 'active' timestamp of the first phase so
+    you are immediately in ACTIVE state.  Press [N]/[P] to walk through phases.
+
+Layout:
+    Same 50/50 split as main.py.
+    LEFT  — user camera feed with skeleton, FPS, rep counter, coach message.
+    RIGHT — plain dark panel showing:
+              • Phase name
+              • Phase timeline bar (watch → prepare → active → end)
+              • All phases listed with current highlighted
+              • "No video needed" notice
 """
 
 import os
 import sys
 import cv2
 import time
-import argparse
-import importlib
 import mediapipe as mp
 
-# ── Path setup ────────────────────────────────────────────────────────────────
-# Allow running from project root OR from tools/ subfolder
-ROOT = os.path.dirname(os.path.abspath(__file__))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
-
-from core.camera         import Camera
-from core.pose_engine    import PoseEngine
-from core.video_controller import ReferenceVideo
-from core.ui_render      import (draw_phase_banner, draw_watch_carefully,
-                                 draw_rep_counter, draw_coach_message,
-                                 draw_hold_overlay, draw_fps)
+from core.camera            import Camera
+from core.pose_engine       import PoseEngine
+from core.exercise_registry import ExerciseRegistry
+from core.ui_render         import render_user_frame
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
+# COLORS  (BGR)
 # ─────────────────────────────────────────────────────────────────────────────
 
-VIDEO_URL = (
-    "https://d2qncakd447jpu.cloudfront.net/"
-    "SKY_Yoga_Physical_Exercises_Play_Practice_with_Video_in_ENGLISH_"
-    "Vethathiri_Maharishi_480P.mp4"
-)
+_DARK    = (18,  18,  18)
+_WHITE   = (240, 240, 240)
+_GREY    = (120, 120, 120)
+_CYAN    = (220, 200,   0)
+_GREEN   = ( 60, 220,  80)
+_YELLOW  = (  0, 200, 255)
+_ORANGE  = (  0, 140, 255)
 
-# Global exercise start timestamps (same as main.py)
-EXERCISE_TIMELINE = {
-    "hand":        67,
-    "leg":         727,
-    "neuro":       1037,
-    "eye":         1497,
-    "kapalabhati": 1838,
-    "makarasana":  1944,
-    "massage":     2584,
-    "acupressure": 2756,
-    "relaxation":  3100,
+_STATE_COLOR = {
+    "WATCH":   _YELLOW,
+    "PREPARE": _CYAN,
+    "ACTIVE":  _GREEN,
+    "ZOOM":    _GREY,
+    "HOLD":    _ORANGE,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# COLOURS  (BGR)
-# ─────────────────────────────────────────────────────────────────────────────
-
-_WHITE  = (240, 240, 240)
-_GREY   = (140, 140, 140)
-_DARK   = (18,  18,  18)
-_GREEN  = (60,  220, 80)
-_RED    = (50,  50,  220)
-_CYAN   = (220, 200, 0)
-_YELLOW = (0,   200, 255)
-_ORANGE = (0,   140, 255)
-
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _pill(frame, text, x, y, bg, fg, scale=0.55, thick=1):
-    """Draw a small pill-shaped label."""
-    ts  = cv2.getTextSize(text, FONT, scale, thick)[0]
-    pad = 5
-    cv2.rectangle(frame, (x - pad, y - ts[1] - pad),
-                  (x + ts[0] + pad, y + pad), bg, -1)
-    cv2.putText(frame, text, (x, y), FONT, scale, fg, thick, cv2.LINE_AA)
-    return x + ts[0] + pad * 2 + 6   # return next x
-
-
-def _text(frame, text, x, y, color=_WHITE, scale=0.55, thick=1):
+def _put(frame, text, x, y, scale=0.60, color=_WHITE, thick=1):
     cv2.putText(frame, text, (x, y), FONT, scale, color, thick, cv2.LINE_AA)
 
 
-def draw_timestamp(frame, video_pos: float):
-    """Top-right: video position mm:ss."""
-    h, w = frame.shape[:2]
-    mins = int(video_pos) // 60
-    secs = int(video_pos) % 60
-    label = f"{mins:02d}:{secs:02d}  ({video_pos:.1f}s)"
-    ts = cv2.getTextSize(label, FONT, 0.55, 1)[0]
-    x  = w - ts[0] - 12
-    _pill(frame, label, x, 28, _DARK, _GREY)
+def _put_centered(frame, text, y, scale=0.65, color=_WHITE, thick=1):
+    w = frame.shape[1]
+    ts = cv2.getTextSize(text, FONT, scale, thick)[0]
+    cv2.putText(frame, text, ((w - ts[0]) // 2, y),
+                FONT, scale, color, thick, cv2.LINE_AA)
 
 
-def draw_phase_selector(frame, phases, current_phase, video_pos):
+def _pill(frame, text, x, y, fg, scale=0.52, thick=1):
+    ts  = cv2.getTextSize(text, FONT, scale, thick)[0]
+    pad = 5
+    cv2.rectangle(frame,
+                  (x - pad, y - ts[1] - pad),
+                  (x + ts[0] + pad, y + pad), fg, -1)
+    cv2.putText(frame, text, (x, y), FONT, scale, _DARK, thick, cv2.LINE_AA)
+
+
+def _dark_panel(w, h):
+    import numpy as np
+    return np.zeros((h, w, 3), dtype="uint8")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INFO PANEL  (right side — replaces reference video)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _draw_info_panel(panel, exercise_key, phases, phase_idx,
+                     video_pos, coach_state, rep_done, rep_target):
     """
-    Bottom strip on the user-camera side showing all phases as pills.
-    Current phase highlighted. Shows which phases are complete / active / upcoming.
+    Draw the right-hand info panel.
+
+    Sections:
+      1. Exercise key badge + coach state pill  (top)
+      2. Current phase name
+      3. Phase timeline bar  (WATCH region | ACTIVE region, with cursor)
+      4. All phases list, current highlighted
+      5. Rep progress bar  (bottom)
+      6. Keyboard shortcuts  (very bottom)
     """
-    h, w = frame.shape[:2]
-    BAR  = 36
-    cv2.rectangle(frame, (0, h - BAR), (w, h), _DARK, -1)
-    cv2.line(frame, (0, h - BAR), (w, h - BAR), _GREY, 1)
+    h, w = panel.shape[:2]
+    panel[:] = _DARK
 
-    x = 8
-    for p in phases:
-        pid   = p["id"]
-        name  = p.get("name", pid)[:12]   # truncate long names
-        start = p["start"]
-        end   = p.get("end", float("inf"))
-        active= p.get("active", start)
+    # accent line at very top
+    sc = _STATE_COLOR.get(coach_state, _WHITE)
+    cv2.line(panel, (0, 0), (w, 0), sc, 3)
 
-        is_current = (pid == (current_phase or {}).get("id"))
-        is_past    = video_pos >= end
-        is_active_now = active <= video_pos < end
+    y = 30
+    # ── 1. exercise key + state ───────────────────────────────────────────
+    _pill(panel, exercise_key.upper(), 14, y, sc, scale=0.68, thick=2)
+    state_ts = cv2.getTextSize(coach_state, FONT, 0.58, 1)[0]
+    _put(panel, coach_state, w - state_ts[0] - 14, y, 0.58, sc, 1)
+
+    y += 20
+    cv2.line(panel, (0, y), (w, y), (40, 40, 40), 1)
+
+    # ── 2. current phase name ─────────────────────────────────────────────
+    y += 26
+    phase = phases[phase_idx] if phases else None
+    if phase:
+        name = phase.get("name", phase.get("id", "—"))
+        _put_centered(panel, name, y, scale=0.68, color=_WHITE, thick=2)
+
+    # video clock readout
+    y += 24
+    _put_centered(panel, f"clock  {video_pos:.1f}s", y, scale=0.48, color=_GREY)
+
+    # ── 3. phase timeline bar ─────────────────────────────────────────────
+    y += 22
+    if phase:
+        p_start  = phase.get("start",  0)
+        p_active = phase.get("active", p_start)
+        p_end    = phase.get("end",    p_active + 30)
+        duration = max(p_end - p_start, 1)
+
+        BAR_X = 20
+        BAR_W = w - 40
+        BAR_H = 16
+
+        # background track
+        cv2.rectangle(panel, (BAR_X, y),
+                      (BAR_X + BAR_W, y + BAR_H), (40, 40, 40), -1)
+
+        # WATCH region (start → active)
+        watch_w = int(BAR_W * (p_active - p_start) / duration)
+        if watch_w > 0:
+            cv2.rectangle(panel, (BAR_X, y),
+                          (BAR_X + watch_w, y + BAR_H), _YELLOW, -1)
+
+        # ACTIVE region (active → end)
+        active_x = BAR_X + watch_w
+        active_w = BAR_W - watch_w
+        if active_w > 0:
+            cv2.rectangle(panel, (active_x, y),
+                          (active_x + active_w, y + BAR_H), _GREEN, -1)
+
+        # cursor (current position)
+        clamped = max(p_start, min(video_pos, p_end))
+        cur_x   = BAR_X + int(BAR_W * (clamped - p_start) / duration)
+        cv2.line(panel, (cur_x, y - 5), (cur_x, y + BAR_H + 5), _WHITE, 3)
+
+        y += BAR_H + 16
+        _put(panel, "WATCH", BAR_X, y, 0.42, _YELLOW)
+        al_ts = cv2.getTextSize("ACTIVE", FONT, 0.42, 1)[0]
+        _put(panel, "ACTIVE", BAR_X + BAR_W - al_ts[0], y, 0.42, _GREEN)
+
+    # ── 4. phase list ─────────────────────────────────────────────────────
+    y += 22
+    cv2.line(panel, (0, y), (w, y), (40, 40, 40), 1)
+    y += 14
+    _put(panel, "PHASES", 14, y, 0.46, _GREY)
+    y += 20
+
+    max_visible = 10
+    start_i = max(0, phase_idx - max_visible // 2)
+    end_i   = min(len(phases), start_i + max_visible)
+
+    for i in range(start_i, end_i):
+        p          = phases[i]
+        is_current = (i == phase_idx)
+        label      = f"  {p.get('name', p.get('id', '?'))}"
+
+        # truncate label if it would overflow
+        while cv2.getTextSize(label, FONT, 0.50, 1)[0][0] > w - 28 and len(label) > 5:
+            label = label[:-2]
+
+        row_color = sc    if is_current else _GREY
+        row_thick = 2     if is_current else 1
 
         if is_current:
-            bg, fg = _CYAN, _DARK
-        elif is_past:
-            bg, fg = (40, 80, 40), _GREY
-        elif is_active_now:
-            bg, fg = (0, 60, 0), _GREEN
-        else:
-            bg, fg = (40, 40, 40), _GREY
+            cv2.rectangle(panel, (0, y - 15), (w, y + 7), (30, 30, 30), -1)
+            # left accent bar for selected row
+            cv2.line(panel, (0, y - 15), (0, y + 7), sc, 5)
 
-        x = _pill(frame, name, x, h - 10, bg, fg, scale=0.42, thick=1)
-        if x > w - 60:   # wrap prevention
+        _put(panel, label, 14, y, 0.50, row_color, row_thick)
+        y += 23
+        if y > h - 90:
             break
 
+    # ── 5. rep progress (bottom section) ─────────────────────────────────
+    if rep_target > 0:
+        y = h - 78
+        cv2.line(panel, (0, y), (w, y), (40, 40, 40), 1)
+        y += 22
+        rep_txt = f"REPS  {rep_done} / {rep_target}"
+        col = _GREEN if rep_done < rep_target else _CYAN
+        _put_centered(panel, rep_txt, y, scale=0.72, color=col, thick=2)
 
-def draw_debug_panel(frame, controller, video_pos, user_lm, w, h):
+        # bar
+        BAR_X2, BAR_W2, BAR_H2 = 20, w - 40, 8
+        y += 14
+        cv2.rectangle(panel, (BAR_X2, y),
+                      (BAR_X2 + BAR_W2, y + BAR_H2), (40, 40, 40), -1)
+        fill = int(BAR_W2 * min(rep_done, rep_target) / rep_target)
+        cv2.rectangle(panel, (BAR_X2, y),
+                      (BAR_X2 + fill, y + BAR_H2), col, -1)
+
+    # ── 6. keyboard shortcuts ──────────────────────────────────────────────
+    shortcuts = "[N] next  [P] prev  [R] reset  [SPACE] pause  [Q] quit"
+    ts = cv2.getTextSize(shortcuts, FONT, 0.37, 1)[0]
+    _put(panel, shortcuts, (w - ts[0]) // 2, h - 14, 0.37, (65, 65, 65))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FAKE VIDEO CLOCK
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FakeClock:
     """
-    Semi-transparent right-side debug panel showing:
-    - Coach state
-    - Phase id + time window
-    - Rep count
-    - Key landmark positions
-    - Internal state vars
+    Simulates ReferenceVideo.position_seconds() without any video file.
+    Starts at a given position and advances with wall time.
+    Supports pause / resume identical to ReferenceVideo.
     """
-    fw, fh = frame.shape[1], frame.shape[0]
-    PW = 260
-    x0 = fw - PW
 
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (x0, 52), (fw, fh - 40), (10, 10, 10), -1)
-    cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
-    cv2.line(frame, (x0, 52), (x0, fh - 40), _GREY, 1)
+    def __init__(self, start_pos: float = 0.0):
+        self._pos    = start_pos
+        self._paused = False
+        self._wall   = time.time()
 
-    y = 72
-    lh = 20   # line height
+    def position_seconds(self) -> float:
+        if self._paused:
+            return self._pos
+        return self._pos + (time.time() - self._wall)
 
-    def row(label, val, color=_WHITE):
-        nonlocal y
-        _text(frame, f"{label:<14}: {val}", x0 + 6, y, _GREY, 0.42)
-        y += lh
+    def seek(self, pos: float):
+        self._pos  = pos
+        self._wall = time.time()
 
-    ap = controller._active_phase
-    row("state",      controller.coach_state)
-    row("phase_id",   (ap or {}).get("id", "none"))
-    row("phase_name", (ap or {}).get("name", "—")[:16])
-    row("video_pos",  f"{video_pos:.1f}s")
+    def pause(self):
+        if not self._paused:
+            self._pos    = self.position_seconds()
+            self._paused = True
 
-    if ap:
-        start  = ap.get("start", 0)
-        active = ap.get("active", start)
-        end    = ap.get("end", 0)
-        row("start",  f"{start}s")
-        row("active", f"{active}s")
-        row("end",    f"{end}s")
-        row("target", ap.get("target", 0))
+    def resume(self):
+        if self._paused:
+            self._wall   = time.time()
+            self._paused = False
 
-    row("reps",       controller.rep_count)
-    row("hold_rem",   f"{controller.hold_remaining:.1f}s")
-    row("err_frames", controller.error_frames)
-
-    # Exercise-1 internal state
-    if hasattr(controller, "_p1_state"):
-        y += 4
-        cv2.line(frame, (x0 + 4, y), (fw - 4, y), (60, 60, 60), 1)
-        y += 8
-        row("p1_state",  controller._p1_state)
-        if controller._p1_hold_start:
-            row("p1_held",   f"{time.time()-controller._p1_hold_start:.1f}s")
-        if controller._p1_down_start:
-            row("p1_rested", f"{time.time()-controller._p1_down_start:.1f}s")
-
-    # Exercise-2 internal state
-    if hasattr(controller, "_p2_state"):
-        y += 4
-        cv2.line(frame, (x0 + 4, y), (fw - 4, y), (60, 60, 60), 1)
-        y += 8
-        row("p2_state",  controller._p2_state)
-
-    # Key landmark values if visible
-    if user_lm:
-        y += 4
-        cv2.line(frame, (x0 + 4, y), (fw - 4, y), (60, 60, 60), 1)
-        y += 8
-        def lmrow(name, idx):
-            if idx < len(user_lm) and user_lm[idx].visibility > 0.3:
-                lmk = user_lm[idx]
-                row(name, f"({lmk.x:.2f},{lmk.y:.2f})")
-            else:
-                row(name, "invisible", _RED)
-
-        lmrow("nose[0]",   0)
-        lmrow("L_shldr[11]", 11)
-        lmrow("R_shldr[12]", 12)
-        lmrow("L_wrist[15]", 15)
-        lmrow("R_wrist[16]", 16)
-        lmrow("L_hip[23]",  23)
-        lmrow("R_hip[24]",  24)
-
-
-def draw_controls_hint(frame):
-    """Small controls reminder at very bottom of user frame."""
-    h, w = frame.shape[:2]
-    hints = "SPACE=pause  N=next  P=prev  R=reset  +/-=seek  D=debug  Q=quit"
-    ts = cv2.getTextSize(hints, FONT, 0.38, 1)[0]
-    x  = (w - ts[0]) // 2
-    cv2.putText(frame, hints, (x, h - 42), FONT, 0.38, _GREY, 1, cv2.LINE_AA)
+    @property
+    def paused(self) -> bool:
+        return self._paused
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LOAD EXERCISE MODULE
+# INTERACTIVE MENU
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_exercise(key: str):
-    """Import exercises/<key>_exercise.py and return a WorkoutController."""
-    module_names = [
-        f"exercises.{key}_exercise",
-        f"exercises.{key}",
-        f"{key}_exercise",
-    ]
-    for name in module_names:
-        try:
-            mod = importlib.import_module(name)
-            ctrl = mod.WorkoutController()
-            print(f"✓ Loaded exercise module: {name}")
-            return ctrl, mod
-        except ModuleNotFoundError:
-            continue
-        except Exception as e:
-            print(f"✗ Error loading {name}: {e}")
-            raise
-
-    raise SystemExit(
-        f"Cannot find exercise module for key='{key}'.\n"
-        f"Tried: {module_names}\n"
-        f"Make sure exercises/{key}_exercise.py exists."
-    )
+def _pick_exercise(registry) -> str:
+    keys = registry.keys()
+    print("\n" + "=" * 50)
+    print("  SKY Yoga — Exercise Tester")
+    print("=" * 50)
+    for i, k in enumerate(keys, 1):
+        print(f"  [{i}]  {k}")
+    print("=" * 50)
+    while True:
+        raw = input("Pick exercise (number or key): ").strip().lower()
+        if raw.isdigit():
+            idx = int(raw) - 1
+            if 0 <= idx < len(keys):
+                return keys[idx]
+        elif raw in keys:
+            return raw
+        print("  Invalid — try again.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PHASE NAVIGATION
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_phase_index(phases, phase_id):
+def _pick_phase(phases: list, hint: str = "") -> int:
+    """Return phase index matching hint string, or 0."""
+    if not hint:
+        return 0
+    h = hint.lower()
     for i, p in enumerate(phases):
-        if p["id"] == phase_id:
+        if h in p.get("id", "").lower() or h in p.get("name", "").lower():
             return i
     return 0
 
 
-def seek_to_phase(ref_video, controller, phase, offset_sec=0.0):
-    """
-    Seek the reference video to the start of a phase.
-    Adds a small pre-roll (2s before phase start) so user sees the transition.
-    Resets the controller for a clean test.
-    """
-    target = max(0.0, phase["start"] - 2.0 + offset_sec)
-    ref_video.seek(target)
-    controller.reset_session()
-    # Force _active_phase to the new phase so state is correct immediately
-    controller._active_phase = phase
-    print(f"  → Seeked to {target:.1f}s  (phase '{phase['id']}' starts at {phase['start']}s)")
+def _phase_clock_start(phase: dict) -> float:
+    """Start clock just before active time so PREPARE briefly shows."""
+    return max(phase["start"], phase.get("active", phase["start"]) - 3.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RENDER  (ref frame overlay — mirrors main.py render_frame)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def render_test_frame(ref_frame, coach_state, watch_msg, rep_done,
-                      rep_target, correct, message, hold_remaining):
-    """Render the reference frame with all overlays (same as production)."""
-    draw_phase_banner(ref_frame, coach_state)
-    draw_fps(ref_frame)
-
-    if coach_state in ("WATCH", "PREPARE", "ZOOM"):
-        draw_watch_carefully(ref_frame, watch_msg)
-
-    if rep_target > 0 and coach_state in ("ACTIVE", "HOLD"):
-        draw_rep_counter(ref_frame, rep_done, rep_target, watch_active=False)
-
-    if coach_state == "ACTIVE" and message:
-        draw_coach_message(ref_frame, message, correct)
-
-    if coach_state == "HOLD":
-        draw_hold_overlay(ref_frame, message, hold_remaining)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN TEST LOOP
+# MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="SKY Yoga — Exercise Tester")
-    parser.add_argument("--exercise", "-e", required=True,
-                        help="Exercise key, e.g. hand, leg, neuro")
-    parser.add_argument("--phase",    "-p", default=None,
-                        help="Phase ID to start at, e.g. p2_t_pose")
-    parser.add_argument("--seek",     "-s", type=float, default=None,
-                        help="Absolute video seek position (seconds)")
-    parser.add_argument("--video",    "-v", default=None,
-                        help="Override video source (local file or URL)")
-    parser.add_argument("--cam",      "-c", type=int, default=0,
-                        help="Camera index (default 0)")
-    parser.add_argument("--debug",    "-d", action="store_true",
-                        help="Start with debug panel open")
-    args = parser.parse_args()
+    args          = sys.argv[1:]
+    exercise_hint = args[0].lower() if len(args) >= 1 else ""
+    phase_hint    = args[1].lower() if len(args) >= 2 else ""
 
-    # ── Load exercise ─────────────────────────────────────────────────────
-    controller, mod = load_exercise(args.exercise)
-    phases = controller.phases()
-    print(f"\n  Exercise : {args.exercise}")
-    print(f"  Phases   : {[p['id'] for p in phases]}\n")
+    print("\n" + "=" * 60)
+    print("  SKY Yoga AI Coach — Pose Tester")
+    print("=" * 60)
+    print("  [N] next phase  [P] prev phase  [R] reset")
+    print("  [SPACE] pause/resume  [Q / ESC] quit")
+    print("=" * 60 + "\n")
 
-    # ── Determine start phase ─────────────────────────────────────────────
-    if args.phase:
-        start_idx = get_phase_index(phases, args.phase)
-        if phases[start_idx]["id"] != args.phase:
-            print(f"  WARNING: phase '{args.phase}' not found, using first phase")
+    # ── load registry ──────────────────────────────────────────────────────
+    registry = ExerciseRegistry()
+    if not registry.keys():
+        print("ERROR: No exercises loaded. Check exercises/ folder.")
+        sys.exit(1)
+
+    # ── choose exercise ────────────────────────────────────────────────────
+    if exercise_hint and exercise_hint in registry.keys():
+        exercise_key = exercise_hint
     else:
-        start_idx = 0
+        exercise_key = _pick_exercise(registry)
 
-    current_phase_idx = start_idx
+    controller = registry.get(exercise_key)
+    phases     = controller.phases()
+    if not phases:
+        print(f"ERROR: '{exercise_key}' has no phases defined.")
+        sys.exit(1)
 
-    # ── Open video ────────────────────────────────────────────────────────
-    video_src = args.video or os.environ.get("SKY_VIDEO", VIDEO_URL)
-    print(f"  Video    : {video_src}")
-    ref_video = ReferenceVideo(video_src)
+    # ── choose starting phase ──────────────────────────────────────────────
+    phase_idx = _pick_phase(phases, phase_hint)
+    print(f"Exercise : {exercise_key}")
+    print(f"Start    : {phases[phase_idx].get('name', phases[phase_idx]['id'])}")
+    print(f"Total    : {len(phases)} phases\n")
 
-    # Offset: the exercise's global timeline start
-    global_offset = EXERCISE_TIMELINE.get(args.exercise, 0)
-
-    # ── Initial seek ──────────────────────────────────────────────────────
-    if args.seek is not None:
-        ref_video.seek(args.seek)
-        controller.reset_session()
-        print(f"  Seeked   : {args.seek}s (manual)")
-    else:
-        phase0 = phases[current_phase_idx]
-        seek_to_phase(ref_video, controller, phase0)
-
-    # ── Open camera & pose engine ─────────────────────────────────────────
-    camera      = Camera(args.cam)
+    # ── hardware setup ─────────────────────────────────────────────────────
+    camera      = Camera(0)
     user_engine = PoseEngine("pose_landmarker_heavy.task")
 
-    # ── State ─────────────────────────────────────────────────────────────
-    show_debug   = args.debug
-    manual_paused = False
+    # ── fake clock ────────────────────────────────────────────────────────
+    clock = FakeClock(start_pos=_phase_clock_start(phases[phase_idx]))
+    controller.reset_session()
 
-    print("\n  Running — press Q or ESC to quit\n")
+    _manual_paused = False
 
     try:
         while True:
-            # ── Grab frames ───────────────────────────────────────────────
-            cam_frame = camera.read()
-            h, w, _   = cam_frame.shape
-            video_pos = ref_video.position_seconds()
+            # ── camera frame ───────────────────────────────────────────────
+            frame   = camera.read()
+            h, w, _ = frame.shape
 
-            # Adjust video_pos by global offset so it matches phase timestamps
-            # (phases store timestamps relative to exercise start in the video)
-            local_pos = video_pos - global_offset
+            # ── clock ──────────────────────────────────────────────────────
+            if _manual_paused:
+                clock.pause()
+            video_pos = clock.position_seconds()
 
-            # ── Pose detection ────────────────────────────────────────────
-            rgb    = cv2.cvtColor(cam_frame, cv2.COLOR_BGR2RGB)
+            # ── pose detection ─────────────────────────────────────────────
+            rgb    = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             user_engine.detect_async(mp_img, int(time.time() * 1000))
 
@@ -418,142 +389,110 @@ def main():
                     and user_engine.latest_result.pose_landmarks):
                 user_lm = user_engine.latest_result.pose_landmarks[0]
 
-            # ── Coach evaluation ──────────────────────────────────────────
+            # ── coach evaluation ───────────────────────────────────────────
             correct, message, should_pause, hold_remaining = controller.update(
-                local_pos, user_lm, w, h
+                video_pos, user_lm, w, h
             )
             coach_state = controller.coach_state
             ap          = controller._active_phase
             watch_msg   = ap.get("watch_msg", "") if ap else ""
-            rep_target  = ap.get("target", 0)    if ap else 0
+            target_reps = ap.get("target", 0)     if ap else 0
             rep_done    = controller.rep_count
 
-            # Track current phase index for navigator
-            if ap:
-                for i, p in enumerate(phases):
-                    if p["id"] == ap["id"]:
-                        current_phase_idx = i
-                        break
-
-            # ── Video pause control ───────────────────────────────────────
-            if manual_paused:
-                ref_video.pause()
-            elif should_pause:
-                ref_video.pause()
+            # ── clock pause logic ──────────────────────────────────────────
+            if _manual_paused or should_pause:
+                clock.pause()
             else:
-                ref_video.resume()
+                clock.resume()
 
-            # ── Read reference frame ──────────────────────────────────────
-            ref_frame = cv2.resize(ref_video.read(), (w, h))
+            # ── auto-advance to next phase when clock passes phase end ─────
+            current_phase = phases[phase_idx]
+            phase_end     = current_phase.get("end", float("inf"))
+            if video_pos >= phase_end and phase_idx < len(phases) - 1:
+                phase_idx += 1
+                controller.reset_session()
+                clock.seek(_phase_clock_start(phases[phase_idx]))
+                print(f"→ Auto: {phases[phase_idx].get('name', phases[phase_idx]['id'])}")
 
-            # ── Draw user frame ───────────────────────────────────────────
-            cam_frame = user_engine.draw_skeleton(cam_frame, correct)
+            # ── draw user frame ────────────────────────────────────────────
+            frame = user_engine.draw_skeleton(frame, correct)
 
-            # Phase selector strip at bottom of user frame
-            draw_phase_selector(cam_frame, phases, ap, local_pos)
-            draw_controls_hint(cam_frame)
+            render_user_frame(
+                frame,
+                coach_state    = coach_state,
+                watch_msg      = watch_msg,
+                rep_done       = rep_done,
+                rep_target     = target_reps,
+                correct        = correct,
+                message        = message,
+                hold_remaining = hold_remaining,
+                video_pos      = video_pos,
+            )
 
-            # State pill on user frame top-left
-            sc = {"WATCH": _YELLOW, "PREPARE": _CYAN, "ACTIVE": _GREEN,
-                  "HOLD": _ORANGE, "ZOOM": _GREY}.get(coach_state, _WHITE)
-            _pill(cam_frame, coach_state, 10, 34, _DARK, sc, 0.65, 2)
+            # paused badge on user frame (top-right, consistent with main.py)
+            if _manual_paused:
+                ts  = cv2.getTextSize("PAUSED", FONT, 0.62, 2)[0]
+                cv2.putText(frame, "PAUSED", (w - ts[0] - 14, 28),
+                            FONT, 0.62, _ORANGE, 2, cv2.LINE_AA)
 
-            # Debug panel
-            if show_debug:
-                draw_debug_panel(cam_frame, controller, local_pos, user_lm, w, h)
+            # ── info panel ────────────────────────────────────────────────
+            panel = _dark_panel(w, h)
+            _draw_info_panel(
+                panel,
+                exercise_key = exercise_key,
+                phases       = phases,
+                phase_idx    = phase_idx,
+                video_pos    = video_pos,
+                coach_state  = coach_state,
+                rep_done     = rep_done,
+                rep_target   = target_reps,
+            )
 
-            # Manual pause indicator
-            if manual_paused:
-                cv2.putText(cam_frame, "PAUSED [SPACE]",
-                            (10, h - 55), FONT, 0.55, _YELLOW, 2, cv2.LINE_AA)
+            # ── display ────────────────────────────────────────────────────
+            cv2.imshow("SKY Yoga — Tester", cv2.hconcat([frame, panel]))
 
-            # ── Draw reference frame ──────────────────────────────────────
-            render_test_frame(ref_frame, coach_state, watch_msg,
-                              rep_done, rep_target, correct,
-                              message, hold_remaining)
-
-            # Timestamp on ref frame
-            draw_timestamp(ref_frame, video_pos)
-
-            # Phase name banner on ref frame (top centre)
-            phase_label = ap.get("name", args.exercise.upper()) if ap else args.exercise.upper()
-            ts = cv2.getTextSize(phase_label, FONT, 0.70, 2)[0]
-            cx = (w - ts[0]) // 2
-            cv2.putText(ref_frame, phase_label, (cx, 34),
-                        FONT, 0.70, _WHITE, 2, cv2.LINE_AA)
-
-            # ── Combine and display ───────────────────────────────────────
-            combined = cv2.hconcat([cam_frame, ref_frame])
-            cv2.imshow(f"SKY Pose Test — {args.exercise}", combined)
-
-            # ── Key handling ──────────────────────────────────────────────
+            # ── keys ───────────────────────────────────────────────────────
             key = cv2.waitKey(1) & 0xFF
 
-            if key in (ord("q"), 27):          # Q or ESC
+            if key in (ord("q"), 27):                   # Q / ESC
                 break
 
-            elif key == ord(" "):              # pause / resume
-                manual_paused = not manual_paused
-                if manual_paused:
-                    ref_video.pause()
-                    print(f"  ⏸ Paused at {video_pos:.1f}s")
+            elif key == ord(" "):                        # SPACE
+                _manual_paused = not _manual_paused
+                if _manual_paused:
+                    clock.pause()
+                    print("⏸ Paused")
                 else:
-                    ref_video.resume()
-                    print(f"  ▶ Resumed")
+                    clock.resume()
+                    print("▶ Resumed")
 
-            elif key == ord("n"):              # next phase
-                next_idx = min(current_phase_idx + 1, len(phases) - 1)
-                if next_idx != current_phase_idx:
-                    current_phase_idx = next_idx
-                    seek_to_phase(ref_video, controller, phases[current_phase_idx])
-                    manual_paused = False
-                    print(f"  → Phase: {phases[current_phase_idx]['id']}")
+            elif key == ord("n"):                        # N — next phase
+                if phase_idx < len(phases) - 1:
+                    phase_idx += 1
+                    controller.reset_session()
+                    clock.seek(_phase_clock_start(phases[phase_idx]))
+                    print(f"→ {phases[phase_idx].get('name', phases[phase_idx]['id'])}")
+                else:
+                    print("  Already at last phase.")
 
-            elif key == ord("p"):              # prev phase
-                prev_idx = max(current_phase_idx - 1, 0)
-                if prev_idx != current_phase_idx:
-                    current_phase_idx = prev_idx
-                    seek_to_phase(ref_video, controller, phases[current_phase_idx])
-                    manual_paused = False
-                    print(f"  → Phase: {phases[current_phase_idx]['id']}")
+            elif key == ord("p"):                        # P — previous phase
+                if phase_idx > 0:
+                    phase_idx -= 1
+                    controller.reset_session()
+                    clock.seek(_phase_clock_start(phases[phase_idx]))
+                    print(f"← {phases[phase_idx].get('name', phases[phase_idx]['id'])}")
+                else:
+                    print("  Already at first phase.")
 
-            elif key == ord("r"):              # reset reps
+            elif key == ord("r"):                        # R — reset
                 controller.reset_session()
-                controller._active_phase = phases[current_phase_idx]
-                print(f"  ↺ Reset — phase: {phases[current_phase_idx]['id']}")
-
-            elif key in (ord("+"), ord("=")):  # seek forward
-                target = ref_video.position_seconds() + 5.0
-                ref_video.seek(target)
-                print(f"  → Seeked to {target:.1f}s")
-
-            elif key == ord("-"):              # seek backward
-                target = max(0.0, ref_video.position_seconds() - 5.0)
-                ref_video.seek(target)
-                print(f"  → Seeked to {target:.1f}s")
-
-            elif key == ord("d"):              # toggle debug
-                show_debug = not show_debug
-                print(f"  Debug overlay: {'ON' if show_debug else 'OFF'}")
+                clock.seek(_phase_clock_start(phases[phase_idx]))
+                print(f"↺ Reset: {phases[phase_idx].get('name', phases[phase_idx]['id'])}")
 
     finally:
         camera.release()
-        ref_video.release()
         cv2.destroyAllWindows()
-
-        # ── Session summary ───────────────────────────────────────────────
-        ap = controller._active_phase
-        print("\n" + "=" * 60)
-        print("SESSION SUMMARY")
-        print("=" * 60)
-        print(f"  Exercise    : {args.exercise}")
-        print(f"  Last phase  : {ap['id'] if ap else 'none'}")
-        print(f"  Reps done   : {controller.rep_count}")
-        if ap:
-            print(f"  Target reps : {ap.get('target', 0)}")
-            pct = controller.rep_count / max(ap.get("target", 1), 1) * 100
-            print(f"  Completion  : {pct:.0f}%")
-        print("=" * 60 + "\n")
+        print("\n✓ Tester closed.\n")
 
 
 if __name__ == "__main__":

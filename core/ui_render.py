@@ -119,7 +119,7 @@ def draw_fps(frame):
     # Tiny dark pill background so it's readable over any frame
     ts   = cv2.getTextSize(label, FONT, 0.55, 1)[0]
     pad  = 4
-    x0, y0 = 10, 8
+    x0, y0 = frame.shape[1] - ts[0] - 14, 8
     cv2.rectangle(
         frame,
         (x0 - pad, y0 - pad),
@@ -518,21 +518,19 @@ def render_reference_frame(frame, *, coach_state: str, video_pos: float = 0.0):
     """
     Render REFERENCE VIDEO FRAME with clean design.
     This is displayed on the RIGHT side of the 50/50 layout.
-    
+
     Shows only:
-      - Clean phase banner (no unnecessary decoration)
-      - Video timer in top right (shows MM:SS timestamp)
-    
+      - Video timer in top-right corner (MM:SS timestamp)
+    Phase banner is shown ONLY on the user camera frame (left side)
+    to avoid duplicate state labels on screen.
+
     Args:
         frame:       BGR frame to draw on (modified in place)
         coach_state: "WATCH" | "PREPARE" | "ACTIVE" | "ZOOM" | "HOLD"
         video_pos:   current video position in seconds for timer display
     """
-
-    # Only draw a minimal phase banner on reference frame
-    draw_phase_banner(frame, coach_state)
-    
-    # Draw video timer in top-right corner for monitoring timeline
+    # Phase banner intentionally omitted — already shown on user frame.
+    # Draw only the video timer in top-right corner.
     draw_video_timer(frame, video_pos)
 
 

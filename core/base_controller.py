@@ -150,9 +150,9 @@ class BaseController(ABC):
         target = phase.get("target", 0)
 
         if target > 0 and done < target:
-            # User is active but not currently in recognized pose.
-            # Do not pause video; just show wrong pose feedback.
-            return _ret(False, "Wrong pose — align with mentor", False)
+            # User is active but rep not yet counted. Only show specific corrections.
+            # Don't show generic "follow the mentor" — let specific form checks provide feedback.
+            return _ret(False, "", False)
 
         if target > 0 and done >= target:
             if done == target:
