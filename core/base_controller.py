@@ -17,6 +17,7 @@ FIXES:
 """
 import time
 from abc import ABC, abstractmethod
+from core.utils import visible
 
 VISIBILITY_MIN   = 0.55
 ERROR_THRESHOLD  = 12
@@ -122,6 +123,13 @@ class BaseController(ABC):
         if user_lm is None:
             return _ret(False, "Step into the camera view", True)
 
+        # Body visibility should require most key points, not every point.
+        key_points = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26]  # shoulders/arms/hips/knees/ankles
+        visible_count = sum(1 for idx in key_points
+                            if idx < len(user_lm) and user_lm[idx].visibility >= VISIBILITY_MIN)
+        if visible_count < len(key_points) * 0.7:  # 70% visible required
+            return _ret(False, "Body is not visible, stay in the frame", False)
+
         is_error, message = self.check_pose(user_lm, w, h, phase)
         self.detect_rep(user_lm, w, h)
 
@@ -140,11 +148,18 @@ class BaseController(ABC):
 
         done   = self.rep_count
         target = phase.get("target", 0)
-        if target > 0:
-            if done >= target:
-                return _ret(True, f"All {target} done — great work!", False)
-            return _ret(True, f"Good form  {done} / {target}", False)
 
+        if target > 0 and done < target:
+            # User is active but not currently in recognized pose.
+            # Do not pause video; just show wrong pose feedback.
+            return _ret(False, "Wrong pose — align with mentor", False)
+
+        if target > 0 and done >= target:
+            if done == target:
+                return _ret(True, f"Good job — you have done the goal repetition! ({done}/{target})", False)
+            return _ret(True, f"Great work! {done}/{target} reps completed", False)
+
+        # No fixed target; keep encouraging.
         return _ret(True, "Good form — keep going", False)
 
     def _compute_state(self, video_pos: float, phase: dict) -> str:

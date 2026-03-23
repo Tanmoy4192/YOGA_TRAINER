@@ -131,6 +131,50 @@ def draw_fps(frame):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# VIDEO TIMER OVERLAY  (top-right — shows video timestamp)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def draw_video_timer(frame, video_pos_sec: float):
+    """
+    Draw video timestamp in top-right corner.
+    Helps user understand video position for exercise timeline.
+    
+    Args:
+        frame:          BGR frame to draw on
+        video_pos_sec:  current video position in seconds
+    """
+    if video_pos_sec < 0:
+        return
+    
+    h, w = frame.shape[:2]
+    FONT = cv2.FONT_HERSHEY_SIMPLEX
+    
+    # Format time as MM:SS
+    minutes = int(video_pos_sec) // 60
+    seconds = int(video_pos_sec) % 60
+    time_label = f"{minutes:02d}:{seconds:02d}"
+    
+    # Get text size for positioning
+    ts = cv2.getTextSize(time_label, FONT, 0.65, 2)[0]
+    pad = 8
+    x = w - ts[0] - pad - 10
+    y = 8
+    
+    # Dark pill background
+    cv2.rectangle(
+        frame,
+        (x - pad, y - pad),
+        (x + ts[0] + pad, y + ts[1] + pad),
+        _DARK, -1
+    )
+    
+    # Draw time text in white
+    cv2.putText(frame, time_label, (x, y + ts[1]),
+                FONT, 0.65, _WHITE, 2, cv2.LINE_AA)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PHASE BANNER  (top strip — state pill ONLY, no exercise name)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -254,40 +298,48 @@ def draw_rep_counter(frame, done: int, target: int, watch_active: bool = False):
 
 def draw_coach_message(frame, message: str, correct: bool):
     """
-    Draw coach message in bottom bar with colour coding.
-    Green background if correct form, red if error.
+    Draw coach message at bottom with subtle, professional styling.
+    Uses light shaded background with text for clean appearance.
+    Does not block view with heavy colored bar.
     """
     if not message:
         return
 
     h, w = frame.shape[:2]
     FONT  = cv2.FONT_HERSHEY_SIMPLEX
-    SCALE = 0.80
+    SCALE = 0.75
     THICK = 2
-    BAR_H = 90
+    BAR_H = 70
 
+    # Professional subtle colors - much lighter and less blocking
     if correct:
-        bg_color  = (0, 60, 0)
-        txt_color = (120, 255, 120)
+        # Subtle green shade for background
+        bg_color  = (30, 40, 30)      # Very dark green tint
     else:
-        bg_color  = (0, 0, 80)
-        txt_color = (100, 100, 255)
+        # Subtle red shade for background
+        bg_color  = (40, 30, 30)      # Very dark red tint
 
+    # Force text to white for readability (skeleton uses green)
+    txt_color = _WHITE
+
+    # Create a subtle shaded background overlay — much less intrusive
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, h - BAR_H), (w, h), bg_color, -1)
-    cv2.addWeighted(overlay, 0.70, frame, 0.30, 0, frame)
+    # Use lower opacity (0.35) so it doesn't block too much
+    cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
 
-    cv2.line(frame, (0, h - BAR_H), (w, h - BAR_H), txt_color, 2)
+    # Subtle top line instead of harsh bar
+    cv2.line(frame, (0, h - BAR_H), (w, h - BAR_H), txt_color, 1)
 
     lines   = _wrap_text(message, w, FONT, SCALE, THICK)
-    total_h = len(lines) * 34
-    y       = h - BAR_H + (BAR_H - total_h) // 2 + 24
+    total_h = len(lines) * 30
+    y       = h - BAR_H + (BAR_H - total_h) // 2 + 20
 
     for ln in lines[:2]:
         ts = cv2.getTextSize(ln, FONT, SCALE, THICK)[0]
         cv2.putText(frame, ln, ((w - ts[0]) // 2, y),
                     FONT, SCALE, txt_color, THICK, cv2.LINE_AA)
-        y += 34
+        y += 30
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -415,52 +467,86 @@ def draw_intro(frame, title: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def render_user_frame(frame, *, coach_state: str, watch_msg: str = "",
+                      rep_done: int = 0, rep_target: int = 0,
+                      correct: bool = True, message: str = "",
+                      hold_remaining: float = 0.0, video_pos: float = 0.0):
+    """
+    Render USER CAMERA FRAME with FPS, feedback, and rep counter.
+    This is displayed on the LEFT side of the 50/50 layout.
+
+    Draw order (painter's algorithm — later = on top):
+      1. Phase banner (top strip, state pill only)
+      2. FPS counter (top-left)
+      3. Rep counter (left side, top area)
+      4. Coach message (bottom bar)
+      5. Hold overlay (HOLD state only)
+
+    Args:
+        frame:          BGR frame to draw on (modified in place)
+        coach_state:    "WATCH" | "PREPARE" | "ACTIVE" | "ZOOM" | "HOLD"
+        watch_msg:      phase watch_msg string (shown during WATCH/PREPARE/ZOOM)
+        rep_done:       reps completed so far
+        rep_target:     reps required for this phase
+        correct:        True = green feedback, False = red
+        message:        coaching text to show in bottom bar
+        hold_remaining: seconds left in HOLD window
+        video_pos:      current video position in seconds (for reference, may not show on user frame)
+    """
+
+    # 1. Top banner (state pill only)
+    draw_phase_banner(frame, coach_state)
+
+    # 2. FPS — top-left corner of user frame
+    draw_fps(frame)
+
+    # 3. Rep counter — only during ACTIVE and HOLD states
+    if rep_target > 0 and coach_state in ("ACTIVE", "HOLD"):
+        draw_rep_counter(frame, rep_done, rep_target, watch_active=False)
+
+    # 4. Bottom coach message
+    # Only show feedback during ACTIVE state
+    if coach_state == "ACTIVE" and message:
+        draw_coach_message(frame, message, correct)
+
+    # 5. Hold overlay — drawn on top of everything when video is frozen
+    if coach_state == "HOLD":
+        draw_hold_overlay(frame, message, hold_remaining)
+
+
+def render_reference_frame(frame, *, coach_state: str, video_pos: float = 0.0):
+    """
+    Render REFERENCE VIDEO FRAME with clean design.
+    This is displayed on the RIGHT side of the 50/50 layout.
+    
+    Shows only:
+      - Clean phase banner (no unnecessary decoration)
+      - Video timer in top right (shows MM:SS timestamp)
+    
+    Args:
+        frame:       BGR frame to draw on (modified in place)
+        coach_state: "WATCH" | "PREPARE" | "ACTIVE" | "ZOOM" | "HOLD"
+        video_pos:   current video position in seconds for timer display
+    """
+
+    # Only draw a minimal phase banner on reference frame
+    draw_phase_banner(frame, coach_state)
+    
+    # Draw video timer in top-right corner for monitoring timeline
+    draw_video_timer(frame, video_pos)
+
+
 def render_frame(frame, *, coach_state: str, watch_msg: str = "",
                  rep_done: int = 0, rep_target: int = 0,
                  correct: bool = True, message: str = "",
                  hold_remaining: float = 0.0):
     """
-    Single entry-point called once per frame from the main loop.
-
-    Draw order (painter's algorithm — later = on top):
-      1. Phase banner (top strip, state pill only)
-      2. FPS counter (top-left, inside the banner area)
-      3. Watch-carefully overlay (WATCH / PREPARE states only)
-      4. Rep counter (left side, below FPS)
-      5. Coach message (bottom bar)
-      6. Hold overlay  (HOLD state only — drawn last, on top of everything)
-
-    Args:
-        frame:          BGR frame to draw on (modified in place)
-        coach_state:    "WATCH" | "PREPARE" | "ACTIVE" | "ZOOM" | "HOLD"
-        watch_msg:      phase watch_msg string (shown during WATCH/PREPARE)
-        rep_done:       reps completed so far
-        rep_target:     reps required for this phase
-        correct:        True = green feedback, False = red
-        message:        coaching text to show in bottom bar
-        hold_remaining: seconds left in HOLD window (used by hold overlay)
+    DEPRECATED: Use render_user_frame() or render_reference_frame() instead.
+    
+    Maintained for backwards compatibility.
+    Calls render_user_frame() internally.
     """
-
-    # 1. Top banner (state pill, no exercise name)
-    draw_phase_banner(frame, coach_state)
-
-    # 2. FPS — drawn immediately after banner so it's always visible
-    draw_fps(frame)
-
-    # 3. Watch-carefully banner during non-active states
-    if coach_state in ("WATCH", "PREPARE", "ZOOM"):
-        draw_watch_carefully(frame, watch_msg)
-
-    # 4. Rep counter — only during ACTIVE and HOLD states
-    #    (no reps to show during WATCH/PREPARE/ZOOM)
-    if rep_target > 0 and coach_state in ("ACTIVE", "HOLD"):
-        draw_rep_counter(frame, rep_done, rep_target, watch_active=False)
-
-    # 5. Bottom coach message — ACTIVE state only
-    #    HOLD state gets its own overlay (drawn below)
-    if coach_state == "ACTIVE" and message:
-        draw_coach_message(frame, message, correct)
-
-    # 6. Hold overlay — drawn on top of everything when video is frozen
-    if coach_state == "HOLD":
-        draw_hold_overlay(frame, message, hold_remaining)
+    render_user_frame(frame, coach_state=coach_state, watch_msg=watch_msg,
+                      rep_done=rep_done, rep_target=rep_target,
+                      correct=correct, message=message,
+                      hold_remaining=hold_remaining)

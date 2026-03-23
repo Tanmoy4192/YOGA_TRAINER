@@ -125,10 +125,11 @@ class ReferenceVideo:
         self._last_frame = None
         self.fps = 30.0
 
-        # Wall-clock position tracking (for URL streams)
+        # Playback position tracking
         self._play_start_wall = None  # time.time() when playback started
         self._play_start_pos = 0.0  # video position at that time
         self._frozen_pos = 0.0  # snapshot position when paused
+        self._current_pos = 0.0  # position advanced by read frames to avoid skips
 
         # Reconnect tracking
         self._last_reconnect = 0.0
@@ -150,13 +151,15 @@ class ReferenceVideo:
             raise RuntimeError(f"Cannot open: {self.source}")
 
         # Configure for reliable streaming
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 10)
+        # Keep buffer small to avoid skipping frames caused by prefetching
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
 
-        # Reset timers
+        # Reset playback tracking
         self._play_start_wall = time.time()
         self._play_start_pos = self._frozen_pos
+        self._current_pos = self._frozen_pos
         self._dim_frame_count = 0
 
     def _reconnect(self, seek_to: float = None):
@@ -222,8 +225,10 @@ class ReferenceVideo:
         # Cache this frame
         self._last_frame = frame.copy()
 
-        # Update frozen position (used if pause happens)
-        self._frozen_pos = self.position_seconds()
+        # Update position by frame now, avoiding wall-clock skipping
+        frame_duration = 1.0 / max(self.fps, 1.0)
+        self._current_pos = self._current_pos + frame_duration
+        self._frozen_pos = self._current_pos
 
         return frame
 
@@ -232,18 +237,13 @@ class ReferenceVideo:
         Get current playback position in seconds.
         Uses wall-clock timing for URL streams (more reliable than CAP_PROP_POS_MSEC).
         """
-        if not self._is_url:
-            # Local files: use built-in position
-            return self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-
+        # Playback uses current tracked position from reads to avoid frame skipping,
+        # while paused returns frozen position. External position queries always use this.
         if self._paused:
-            # Paused: return snapshot position
             return self._frozen_pos
 
-        # URL stream: use wall clock
-        elapsed = time.time() - self._play_start_wall
-        current_pos = self._play_start_pos + elapsed
-        return current_pos
+        # For local + URL both, use current position updated per frame read.
+        return self._current_pos
 
     def pause(self):
         """Pause playback."""

@@ -17,7 +17,7 @@ from core.camera import Camera
 from core.pose_engine import PoseEngine
 from core.video_controller import ReferenceVideo
 from core.exercise_registry import ExerciseRegistry
-from core.ui_render import render_frame, draw_countdown, draw_intro, draw_fps
+from core.ui_render import render_frame, render_user_frame, render_reference_frame, draw_countdown, draw_intro, draw_fps
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VIDEO SOURCE
@@ -35,7 +35,7 @@ VIDEO_SOURCE = os.environ.get("SKY_VIDEO", VIDEO_URL)
 # ─────────────────────────────────────────────────────────────────────────────
 
 EXERCISE_TIMELINE = [
-    {"key": "hand",        "start": 10},
+    {"key": "hand",        "start": 14},
     {"key": "leg",         "start": 661},
     {"key": "neuro",       "start": 1037},
     {"key": "eye",         "start": 1497},
@@ -97,8 +97,10 @@ def main():
             # ── INTRO PHASE ───────────────────────────────────────────────
             if elapsed < INTRO_SEC:
                 ref_frame = cv2.resize(ref_video.read(), (w, h))
-                draw_intro(ref_frame, "SKY Yoga - AI Coach")
-                draw_fps(ref_frame)
+                draw_intro(frame, "SKY Yoga - AI Coach")
+                draw_fps(frame)
+                video_pos = ref_video.position_seconds()
+                render_reference_frame(ref_frame, coach_state="WATCH", video_pos=video_pos)
                 cv2.imshow("SKY Yoga", cv2.hconcat([frame, ref_frame]))
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
@@ -109,8 +111,10 @@ def main():
             if elapsed < INTRO_SEC + COUNTDOWN_SEC:
                 secs      = int(INTRO_SEC + COUNTDOWN_SEC - elapsed) + 1
                 ref_frame = cv2.resize(ref_video.read(), (w, h))
-                draw_countdown(ref_frame, secs)
-                draw_fps(ref_frame)
+                draw_countdown(frame, secs)
+                draw_fps(frame)
+                video_pos = ref_video.position_seconds()
+                render_reference_frame(ref_frame, coach_state="WATCH", video_pos=video_pos)
                 cv2.imshow("SKY Yoga", cv2.hconcat([frame, ref_frame]))
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
@@ -126,7 +130,8 @@ def main():
             # ── No exercise at this timestamp yet ─────────────────────────
             if ex_info is None:
                 ref_frame = cv2.resize(ref_video.read(), (w, h))
-                draw_fps(ref_frame)
+                draw_fps(frame)
+                render_reference_frame(ref_frame, coach_state="WATCH", video_pos=video_pos)
                 cv2.imshow("SKY Yoga", cv2.hconcat([frame, ref_frame]))
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
@@ -200,9 +205,10 @@ def main():
             # ── DRAW USER FRAME ───────────────────────────────────────────
             frame = user_engine.draw_skeleton(frame, correct)
 
-            # ── DRAW REF FRAME ────────────────────────────────────────────
-            render_frame(
-                ref_frame,
+            # ── DRAW USER FRAME OVERLAY ───────────────────────────────────
+            # Apply all FPS, rep counter, and feedback messages to user frame
+            render_user_frame(
+                frame,
                 coach_state    = coach_state,
                 watch_msg      = watch_msg,
                 rep_done       = rep_done,
@@ -210,19 +216,25 @@ def main():
                 correct        = correct,
                 message        = message,
                 hold_remaining = hold_remaining,
+                video_pos      = video_pos,
             )
+
+            # ── DRAW REF FRAME ────────────────────────────────────────────
+            # Keep reference frame clean with minimal UI + timer
+            render_reference_frame(ref_frame, coach_state=coach_state, video_pos=video_pos)
 
             # ── MANUAL PAUSE INDICATOR on ref frame ───────────────────────
             if _manual_paused:
+                h_ref, w_ref = ref_frame.shape[:2]
                 cv2.putText(
                     ref_frame,
                     "⏸ PAUSED  [SPACE to resume]",
-                    (10, h - 12),
+                    (10, h_ref - 12),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.62, (0, 200, 255), 2, cv2.LINE_AA,
                 )
 
-            # ── DISPLAY ───────────────────────────────────────────────────
+            # ── DISPLAY (50/50 layout: user on left, reference on right) ───
             cv2.imshow("SKY Yoga", cv2.hconcat([frame, ref_frame]))
 
             # ── KEY HANDLING ──────────────────────────────────────────────
