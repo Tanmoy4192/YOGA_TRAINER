@@ -2,8 +2,6 @@
 exercises/neuro_muscular_exercise.py — SKY Yoga Neuro Muscular Exercises
 
 SEQUENCE:
-  p1  Nerve Stimulation (Massage)   — zoom/watch only, foot massage technique
-  p2  Lower Back (Kidney) Breathing — sit Vajrasana, hands on lower back, 10 breaths
   p3  Waist Breathing               — hands on sides of waist, 10 breaths
   p4  Upper Chest Breathing         — fingers near armpits on upper chest, 10 breaths
   p5  Thigh Breathing               — hands flat on thighs near knees, 10 breaths
@@ -17,7 +15,6 @@ PHILOSOPHY:
   - Rep counting uses BreathDetector — 1 inhale+exhale cycle = 1 rep
   - Pose checks are LENIENT: only fire on clearly wrong position
   - Vajrasana check skipped when leg landmarks are not visible
-  - p1_massage is zoom-only (no pose check, no reps)
   - p8_relax has target=0 so no rep counting, pose check is optional feedback only
 """
 
@@ -33,73 +30,56 @@ EXERCISE_KEY = "neuro"
 # ─────────────────────────────────────────────────────────────────────────────
 
 _PHASES = [
-    # ── 1. Nerve Stimulation — zoom / watch only ──────────────────────────────
-    {
-        "id":        "p1_massage",
-        "name":      "Nerve Stimulation (Massage)",
-        "start":     1037, "active": 1037, "end": 1275,
-        "zoom":      True,
-        "watch_msg": "Watch the foot massage technique closely — observe every step.",
-    },
-    # ── 2. Lower Back (Kidney) Breathing ─────────────────────────────────────
-    {
-        "id":        "p2_kidney",
-        "name":      "Lower Back Breathing",
-        "start":     1275, "active": 1290, "end": 1320,
-        "target":    10,
-        "watch_msg": "Sit in Vajrasana. Place both hands on your lower back (kidney area).",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
-    },
-    # ── 3. Waist Breathing ────────────────────────────────────────────────────
+    # ── 1. Waist Breathing — 22:10 → 22:58 → 24:27 ──────────────────────────
     {
         "id":        "p3_waist",
         "name":      "Waist Breathing",
-        "start":     1320, "active": 1325, "end": 1350,
+        "start":     1330, "active": 1378, "end": 1467,
         "target":    10,
         "watch_msg": "Keep sitting. Move hands to the sides of your waist.",
         "check_landmarks": [11, 12, 15, 16, 23, 24],
     },
-    # ── 4. Upper Chest Breathing ──────────────────────────────────────────────
+    # ── 2. Upper Chest Breathing — 24:27 → 24:51 → 26:03 ────────────────────
     {
         "id":        "p4_chest",
         "name":      "Upper Chest Breathing",
-        "start":     1350, "active": 1355, "end": 1380,
+        "start":     1467, "active": 1491, "end": 1563,
         "target":    10,
         "watch_msg": "Place your fingers on your upper chest near the armpits.",
         "check_landmarks": [11, 12, 13, 14, 15, 16],
     },
-    # ── 5. Thigh Breathing ────────────────────────────────────────────────────
+    # ── 3. Thigh Breathing — 26:03 → 26:36 → 27:51 ──────────────────────────
     {
         "id":        "p5_thighs",
         "name":      "Thigh Breathing",
-        "start":     1380, "active": 1385, "end": 1410,
+        "start":     1563, "active": 1596, "end": 1671,
         "target":    10,
         "watch_msg": "Rest your hands flat on your thighs near the knees.",
         "check_landmarks": [15, 16, 25, 26],
     },
-    # ── 6. Abdomen Breathing ──────────────────────────────────────────────────
+    # ── 4. Abdomen Breathing — 27:51 → 28:04 → 28:40 ────────────────────────
     {
         "id":        "p6_abdomen",
         "name":      "Abdomen Breathing",
-        "start":     1410, "active": 1415, "end": 1440,
+        "start":     1671, "active": 1684, "end": 1720,
         "target":    10,
         "watch_msg": "Make fists and press them gently on your lower abdomen.",
         "check_landmarks": [15, 16, 23, 24],
     },
-    # ── 7. Forward Bend Breathing ─────────────────────────────────────────────
+    # ── 5. Forward Bend Breathing — 28:40 → 29:03 → 29:37 ───────────────────
     {
         "id":        "p7_forward",
         "name":      "Forward Bend Breathing",
-        "start":     1440, "active": 1445, "end": 1485,
+        "start":     1720, "active": 1743, "end": 1777,
         "target":    10,
         "watch_msg": "From Vajrasana, bend forward and touch your forehead to the ground.",
         "check_landmarks": [0, 11, 12, 23, 24],
     },
-    # ── 8. Chin Mudra Relaxation ──────────────────────────────────────────────
+    # ── 6. Chin Mudra Relaxation — 29:38 → 29:55 → 30:31 ────────────────────
     {
         "id":        "p8_relax",
         "name":      "Chin Mudra Relaxation",
-        "start":     1485, "active": 1490, "end": 1560,
+        "start":     1778, "active": 1795, "end": 1831,
         "target":    0,
         "watch_msg": "Sit upright, rest hands on knees in Chin Mudra. Breathe naturally.",
         "check_landmarks": [11, 12, 15, 16, 25, 26],
@@ -141,19 +121,16 @@ class WorkoutController(BaseController):
         """
         pid = phase["id"]
 
-        # p1 is zoom-only — base_controller never calls check_pose for ZOOM state
         # p8 is free relaxation — skip form checking, just encourage
-        if pid in ("p1_massage", "p8_relax"):
+        if pid == "p8_relax":
             return (False, "Good — breathe naturally and relax.")
 
-        # All seated breathing phases require Vajrasana (except forward bend
-        # which is its own body position)
+        # All seated breathing phases require Vajrasana (except forward bend)
         if pid != "p7_forward":
             vajra_ok, vajra_err = self._check_vajrasana(lm, w, h)
             if not vajra_ok:
                 return (True, vajra_err)
 
-        if pid == "p2_kidney":  return self._check_hands_kidney(lm, w, h)
         if pid == "p3_waist":   return self._check_hands_waist(lm, w, h)
         if pid == "p4_chest":   return self._check_hands_chest(lm, w, h)
         if pid == "p5_thighs":  return self._check_hands_thighs(lm, w, h)
@@ -169,9 +146,16 @@ class WorkoutController(BaseController):
         Count reps by breath detection (shoulder y-oscillation).
         Uses _active_phase (not _get_phase) so counting persists
         through HOLD state and inter-phase gaps, identical to hand_exercise.py.
+
+        IMPORTANT: Only feeds the breath detector when pose is correct
+        (error_frames == 0). This prevents reps counting during wrong pose.
         """
         p = self._active_phase
         if not p or p.get("target", 0) == 0:
+            return
+
+        # Do not count breaths while pose errors are active
+        if self.error_frames > 0:
             return
 
         # Feed shoulder midpoint y to breath detector (normalized 0-1)
@@ -212,24 +196,6 @@ class WorkoutController(BaseController):
             return (False, "Keep your knees on the floor in Vajrasana.")
 
         return (True, None)
-
-    def _check_hands_kidney(self, lm, w, h) -> tuple:
-        """
-        Hands on lower back / kidney area.
-        Wrists (15, 16) should be close to hips (23, 24).
-        LENIENT threshold: 18% of frame width.
-        """
-        if not visible(lm, 15, 16, 23, 24):
-            return (False, "Good — keep your hands on your lower back.")
-
-        lwr = px(lm, 15, w, h)
-        rwr = px(lm, 16, w, h)
-        lh  = px(lm, 23, w, h)
-        rh  = px(lm, 24, w, h)
-
-        if dist(lwr, lh) > w * 0.18 or dist(rwr, rh) > w * 0.18:
-            return (True, "Place both hands on your lower back (kidney area).")
-        return (False, "Good — hands on lower back. Breathe deeply.")
 
     def _check_hands_waist(self, lm, w, h) -> tuple:
         """
