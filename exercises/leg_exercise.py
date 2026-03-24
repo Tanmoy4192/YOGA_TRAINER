@@ -30,7 +30,7 @@ REP DETECTION APPROACH:
 """
 
 from core.base_controller import BaseController
-from core.utils import calculate_angle, dist, lm_px
+from core.utils import angle, dist, px
 
 EXERCISE_KEY = "leg"
 
@@ -106,14 +106,14 @@ class WorkoutController(BaseController):
     # SETUP — guide user into correct starting position
     # ══════════════════════════════════════════════════════════════════
     def _check_setup(self, lm, w, h) -> tuple:
-        lh = lm_px(lm, 23, w, h); rh = lm_px(lm, 24, w, h)
-        lk = lm_px(lm, 25, w, h); rk = lm_px(lm, 26, w, h)
-        la = lm_px(lm, 27, w, h); ra = lm_px(lm, 28, w, h)
-        lw = lm_px(lm, 15, w, h); rw = lm_px(lm, 16, w, h)
+        lh = px(lm, 23, w, h); rh = px(lm, 24, w, h)
+        lk = px(lm, 25, w, h); rk = px(lm, 26, w, h)
+        la = px(lm, 27, w, h); ra = px(lm, 28, w, h)
+        lw = px(lm, 15, w, h); rw = px(lm, 16, w, h)
 
-        if calculate_angle(lh, lk, la) < 155:
+        if angle(lh, lk, la) < 155:
             return True, "Straighten your left leg all the way out in front of you"
-        if calculate_angle(rh, rk, ra) < 155:
+        if angle(rh, rk, ra) < 155:
             return True, "Straighten your right leg all the way out in front of you"
 
         ankle_dist = dist(la, ra)
@@ -176,15 +176,15 @@ class WorkoutController(BaseController):
     # TOE ROTATION CHECK — coach messages
     # ══════════════════════════════════════════════════════════════════
     def _check_toe_rotation(self, lm, w, h) -> tuple:
-        lh = lm_px(lm, 23, w, h); rh = lm_px(lm, 24, w, h)
-        lk = lm_px(lm, 25, w, h); rk = lm_px(lm, 26, w, h)
-        la = lm_px(lm, 27, w, h); ra = lm_px(lm, 28, w, h)
+        lh = px(lm, 23, w, h); rh = px(lm, 24, w, h)
+        lk = px(lm, 25, w, h); rk = px(lm, 26, w, h)
+        la = px(lm, 27, w, h); ra = px(lm, 28, w, h)
         done = self.rep_count
 
         # Must keep legs straight throughout
-        if calculate_angle(lh, lk, la) < 145:
+        if angle(lh, lk, la) < 145:
             return True, "Keep your left leg straight — do not bend the knee"
-        if calculate_angle(rh, rk, ra) < 145:
+        if angle(rh, rk, ra) < 145:
             return True, "Keep your right leg straight — do not bend the knee"
 
         # Must keep legs spread

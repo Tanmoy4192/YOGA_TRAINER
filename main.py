@@ -37,11 +37,11 @@ VIDEO_SOURCE = os.environ.get("SKY_VIDEO", VIDEO_URL)
 EXERCISE_TIMELINE = [
     {"key": "hand",        "start": 14},
     {"key": "leg",         "start": 661},
-    {"key": "neuro",       "start": 1037},
-    {"key": "eye",         "start": 1497},
-    {"key": "kapalabhati", "start": 1838},
-    {"key": "makarasana",  "start": 1944},
-    {"key": "massage",     "start": 2584},
+    {"key": "neuro",       "start": 1331},
+    {"key": "eye",         "start": 1835},
+    {"key": "kapalabhati", "start": 1879},
+    {"key": "makarasana",  "start": 2418},
+    {"key": "massage",     "start": 3024},
     {"key": "acupressure", "start": 2756},
     {"key": "relaxation",  "start": 3100},
 ]
