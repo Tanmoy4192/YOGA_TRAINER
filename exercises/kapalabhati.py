@@ -155,33 +155,40 @@ class WorkoutController(BaseController):
             return (False, None)
 
     def detect_rep(self, lm, w: int, h: int):
-        """
-        Detects Kapalabhati breaths by tracking shoulder  movement.
-        Updates self.rep_count according to base_controller requirements.
-        """
-        # Only detects shoulder jerks during 'alt_breathing' phase 
-        # or self._active_phases
-        if not self._active_phase or "alt_breathing" not in self._active_phase.get("id", ""):
-            return
-        
-        # Get the current timestamp
-        current_time = time.time()
+            # 1. Phase Check
+            if not self._active_phase or "alt_breathing" not in self._active_phase.get("id", ""):
+                return
+                
+            # 2. CAP CHECK: Stop counting if we hit 10 reps
+            if self.rep_count >= 10:
+                return
 
-        # Get pixel coordinates for the shoulders to track the Y-coordinates
-        # for the "jerk"
-        r_shoulder_y = lm[12].y * h
-        l_shoulder_y = lm[11].y * h
+            # 3. POSE COLOR CHECK: Only detect if the pose is "Green" (No errors)
+            # We check the current message/status from the latest pose validation
+            # In most base_controller setups, self.current_error stores the current feedback
+            if hasattr(self, 'current_error') and self.current_error is not None:
+                return
 
-        # Update motion trackers with the current vertical position
-        # Returns True if it detects an 'arc' (sudden updward-downward jerk)
-        is_jerk_r = self._tracker_r.update(current_time, r_shoulder_y)
-        is_jerk_l = self._tracker_l.update(current_time, l_shoulder_y)
+            current_time = time.time()
+            avg_shoulder_y = (lm[11].y + lm[12].y) / 2
+            
+            # 4. Velocity Spike Logic
+            if hasattr(self, '_prev_shoulder_y') and hasattr(self, '_prev_time'):
+                dt = current_time - self._prev_time
+                if dt > 0:
+                    dy = avg_shoulder_y - self._prev_shoulder_y
+                    velocity = dy / dt
 
-        # Increment the rep count
-        # Updates the rep_count if a jerk is noticed via Motion Capture
-        # base_controller handles the reset
-        if is_jerk_r or is_jerk_l:
-            self.rep_count += 1
+                    # Detect the jerk (Upward velocity is negative in MediaPipe)
+                    if velocity < -0.15:  
+                        # Cooldown to prevent double-counting
+                        if not hasattr(self, '_last_rep_time') or (current_time - self._last_rep_time > 0.2):
+                            self.rep_count += 1
+                            self._last_rep_time = current_time
+
+            # 5. Save state
+            self._prev_shoulder_y = avg_shoulder_y
+            self._prev_time = current_time
 
     # ─────────────────────────────────────────────────────────────────────
     # POSE DETECTION FOR THE PHASES
