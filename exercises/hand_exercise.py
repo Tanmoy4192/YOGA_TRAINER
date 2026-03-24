@@ -654,8 +654,8 @@ class WorkoutController(BaseController):
 
     def _rep_upper_body(self, lm, w, h):
         """
-        State machine: CENTER → LEFT or RIGHT → back to CENTER = 1 rep.
-        Each full side-sweep (out and back) counts as 1 rep independently.
+        State machine: CENTER → RIGHT → CENTER → LEFT → CENTER = 1 rep.
+        Body must complete a full right-to-left rotation to count as 1 rep.
         """
         if not visible(lm, 11, 12, 15, 16):
             return
@@ -674,20 +674,23 @@ class WorkoutController(BaseController):
 
         if st == "CENTER":
             if wrist_mid_x > sh_left + SWEEP_OUT:
-                self._ub_state    = "LEFT"    # swept to user's left (screen right)
+                self._ub_state = "LEFT"
             elif wrist_mid_x < sh_right - SWEEP_OUT:
-                self._ub_state    = "RIGHT"   # swept to user's right (screen left)
-
-        elif st == "LEFT":
-            # Returned close enough to center
-            if abs(wrist_mid_x - sh_center) < (sh_left - sh_right) * 0.4 + RETURN_IN:
-                self._ub_state = "CENTER"
-                self.rep_count += 1   # completed 1 sweep
+                self._ub_state = "RIGHT"
 
         elif st == "RIGHT":
-            if abs(wrist_mid_x - sh_center) < (sh_left - sh_right) * 0.4 + RETURN_IN:
+            if wrist_mid_x > sh_left + SWEEP_OUT:
+                # Moved from RIGHT side to LEFT side — mark that we visited LEFT
+                self._ub_state = "LEFT"
+            elif abs(wrist_mid_x - sh_center) < (sh_left - sh_right) * 0.4 + RETURN_IN:
+                # Returned to center without reaching opposite side
                 self._ub_state = "CENTER"
-                self.rep_count += 1   # completed 1 sweep
+
+        elif st == "LEFT":
+            if abs(wrist_mid_x - sh_center) < (sh_left - sh_right) * 0.4 + RETURN_IN:
+                # Returned to center after completing right-to-left rotation = 1 rep
+                self._ub_state = "CENTER"
+                self.rep_count += 1
 
     # =========================================================================
     # p12–p13 — KNEE ROTATION CW / CCW
