@@ -16,9 +16,9 @@ REP DETECTION APPROACH:
 """
 
 from core.base_controller import BaseController
-from core.utils import calculate_angle, dist, lm_px, visible
+from core.utils import angle, dist, px, visible
 
-EXERCISE_KEY = "makarsana"
+EXERCISE_KEY = "makarasana"
 
 HOLD_FRAMES = 8
 
@@ -70,7 +70,7 @@ class WorkoutController(BaseController):
         return self._coach_state
 
     # ── dispatcher ───────────────────────────────────────────────────
-    def check_pose(self, user_lm, ref_lm, w, h, phase) -> tuple:
+    def check_pose(self, user_lm, w, h, phase) -> tuple:
         pid = phase["id"]
         if pid == "mk_p1_setup":
             return self._check_setup(user_lm, w, h)
@@ -90,13 +90,13 @@ class WorkoutController(BaseController):
         if not visible(lm, 23, 24, 25, 26, 27, 28):
             return False, None
 
-        lh = lm_px(lm, 23, w, h); rh = lm_px(lm, 24, w, h)
-        lk = lm_px(lm, 25, w, h); rk = lm_px(lm, 26, w, h)
-        la = lm_px(lm, 27, w, h); ra = lm_px(lm, 28, w, h)
+        lh = px(lm, 23, w, h); rh = px(lm, 24, w, h)
+        lk = px(lm, 25, w, h); rk = px(lm, 26, w, h)
+        la = px(lm, 27, w, h); ra = px(lm, 28, w, h)
 
-        if calculate_angle(lh, lk, la) < 150:
+        if angle(lh, lk, la) < 150:
             return True, "Keep your left leg straight and relaxed"
-        if calculate_angle(rh, rk, ra) < 150:
+        if angle(rh, rk, ra) < 150:
             return True, "Keep your right leg straight and relaxed"
 
         if dist(la, ra) / (dist(lh, rh) or 1) < 0.5:
@@ -111,13 +111,13 @@ class WorkoutController(BaseController):
         if not visible(lm, 23, 24, 25, 26, 27, 28):
             return False, None
 
-        lh = lm_px(lm, 23, w, h); rh = lm_px(lm, 24, w, h)
-        lk = lm_px(lm, 25, w, h); rk = lm_px(lm, 26, w, h)
-        la = lm_px(lm, 27, w, h); ra = lm_px(lm, 28, w, h)
+        lh = px(lm, 23, w, h); rh = px(lm, 24, w, h)
+        lk = px(lm, 25, w, h); rk = px(lm, 26, w, h)
+        la = px(lm, 27, w, h); ra = px(lm, 28, w, h)
 
-        if calculate_angle(lh, lk, la) < 145:
+        if angle(lh, lk, la) < 145:
             return True, "Do not bend your left leg"
-        if calculate_angle(rh, rk, ra) < 145:
+        if angle(rh, rk, ra) < 145:
             return True, "Do not bend your right leg"
 
         if dist(la, ra) / (dist(lh, rh) or 1) < 0.5:
@@ -149,6 +149,7 @@ class WorkoutController(BaseController):
             self._still_count = max(0, self._still_count - 1)
 
         if self._still_count >= HOLD_FRAMES:
-            self.rep_count += 1
+            self.rep_count = min(self.rep_count + 1, self._active_phase.get("target", 1))
+            self._still_count = 0
 
-        self._prev_lm = lmS
+        self._prev_lm = lm

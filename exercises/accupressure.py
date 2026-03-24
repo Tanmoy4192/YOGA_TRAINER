@@ -40,7 +40,7 @@ from core.base_controller import BaseController
 from core.utils           import angle, dist, px, visible, shoulder_width
 from core.breath_detector import BreathDetector
 
-EXERCISE_KEY = "acupressure"
+EXERCISE_KEY = "accupressure"
 
 HOLD_FRAMES = 8
 

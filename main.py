@@ -42,7 +42,7 @@ EXERCISE_TIMELINE = [
     {"key": "kapalabhati", "start": 1879},
     {"key": "makarasana",  "start": 2418},
     {"key": "massage",     "start": 3024},
-    {"key": "acupressure", "start": 3197},
+    {"key": "accupressure", "start": 3197},
     {"key": "relaxation",  "start": 3490},
 ]
 

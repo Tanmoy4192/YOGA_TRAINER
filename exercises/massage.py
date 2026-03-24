@@ -11,7 +11,7 @@ REP DETECTION APPROACH:
 """
 
 from core.base_controller import BaseController
-from core.utils import calculate_angle, dist, lm_px, visible, shoulder_width
+from core.utils import dist, px, visible, shoulder_width
 
 EXERCISE_KEY = "massage"
 
@@ -55,7 +55,7 @@ class WorkoutController(BaseController):
         return self._coach_state
 
     # ── dispatcher ───────────────────────────────────────────────────
-    def check_pose(self, user_lm, ref_lm, w, h, phase) -> tuple:
+    def check_pose(self, user_lm, w, h, phase) -> tuple:
         return self._check_massage(user_lm, w, h)
 
     def detect_rep(self, user_lm, w, h):
@@ -70,8 +70,8 @@ class WorkoutController(BaseController):
         if not visible(lm, 11, 12, 15, 16):
             return False, None
 
-        lw = lm_px(lm, 15, w, h); rw = lm_px(lm, 16, w, h)
-        nose = lm_px(lm, 0, w, h)
+        lw = px(lm, 15, w, h); rw = px(lm, 16, w, h)
+        nose = px(lm, 0, w, h)
 
         sw = shoulder_width(lm, w, h)
 
@@ -103,6 +103,7 @@ class WorkoutController(BaseController):
             self._move_count = max(0, self._move_count - 1)
 
         if self._move_count >= HOLD_FRAMES:
-            self.rep_count += 1
+            self.rep_count = min(self.rep_count + 1, self._active_phase.get("target", 10))
+            self._move_count = 0
 
         self._prev_lm = lm
