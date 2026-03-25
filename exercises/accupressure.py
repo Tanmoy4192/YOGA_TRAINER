@@ -1,200 +1,537 @@
 """
-exercises/acupressure.py — SKY Yoga Acupressure Exercise
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+exercises/accupressure.py — SKY Yoga Acupressure Exercise
 
-SEQUENCE — 14 Acupressure Points + Finish Rest:
-  p1   Left Neck                    — right hand on left side of neck
-  p2   Upper Abdomen (Solar Plexus) — right index finger at ribcage center
-  p3   Mid Abdomen                  — one inch below p2
-  p4   Above Navel                  — one inch above navel
-  p5   Navel Pull Up                — right index finger in navel, pull toward head
-  p6   Navel Push Down              — right thumb in navel, push toward feet
-  p7   Navel Pull Right Shoulder    — right index finger in navel, pull to right shoulder
-  p8   Navel Pull Left Shoulder     — right index finger in navel, pull to left shoulder
-  p9   Navel Pull Right Thigh       — right index finger in navel, pull to right thigh
-  p10  Navel Push Left Thigh        — right thumb in navel, push to left thigh
-  p11  Right Ribs                   — right index finger one inch below right ribcage
-  p12  Left Ribs                    — right index finger one inch below left ribcage
-  p13  Right Waist                  — right thumb on soft area between right rib and hip
-  p14  Lower Left Abdomen           — right index + middle fingers between navel and left groin
-  p15  Finish Rest                  — arms relaxed to sides, full rest
+CONVERTED FROM THE STANDALONE ACUPRESSURE MODULE INTO THE REPO'S
+STANDARD SINGLE-FILE EXERCISE FORMAT.
 
-POSTURE RULES (instructor):
-  - Lie flat on back, completely relaxed
-  - Hold each point ~30 seconds (~8 deep breaths)
-  - Use right index finger or thumb; other fingers extended, not touching body
-  - Use fleshy pad of finger — nails must not dig in
+SEQUENCE:
+  p1   Left Neck
+  p2   Solar Plexus
+  p3   Mid Abdomen
+  p4   Above Navel
+  p5   Navel Pull Up
+  p6   Navel Push Down
+  p7   Navel → Right Shoulder
+  p8   Navel → Left Shoulder
+  p9   Navel → Right Thigh
+  p10  Navel → Left Thigh
+  p11  Right Ribs
+  p12  Left Ribs
+  p13  Right Waist
+  p14  Lower Left Abdomen
+  p15  Relax
 
-REP DETECTION:
-  Each phase uses BreathDetector. Target = 8 breaths per point.
-  Reps only count when right hand is confirmed touching the correct point.
-  error_frames gate prevents counting during wrong pose.
-
-POSE CHECK:
-  1. Lying flat check  — only fires when clearly standing
-  2. Hand-on-point check — uses body-relative virtual targets + distance threshold
-     Skipped silently when landmarks not visible.
+DETECTION MODEL:
+  - Dynamic body-relative points computed from pose landmarks
+  - Right index / thumb taken from pose finger landmarks already available
+  - Touch requires XY proximity, Z-depth proximity and valid direction when needed
+  - Each point is treated as a ~30 second / ~8 breath hold
 """
 
+import math
+import time
+from collections import deque
+from dataclasses import dataclass, field
+
 from core.base_controller import BaseController
-from core.utils           import angle, dist, px, visible, shoulder_width
 from core.breath_detector import BreathDetector
+from core.utils import visible
 
 EXERCISE_KEY = "accupressure"
 
-HOLD_FRAMES = 8
+# Pose landmark indices already used elsewhere in this project
+L_SHOULDER = 11
+R_SHOULDER = 12
+L_HIP = 23
+R_HIP = 24
+L_EAR = 7
+NOSE = 0
+L_KNEE = 25
+R_INDEX_TIP = 20
+R_THUMB_TIP = 22
+L_WRIST = 15
+R_WRIST = 16
+
+TARGET_BREATHS = 1
+TARGET_HOLD_SEC = 30.0
+HOLD_CONFIRM_SEC = 2.0
+TIME_STEP_SEC = TARGET_HOLD_SEC
+SMOOTH_N = 6
+DIR_THRESHOLD = 0.004
+Z_TOUCH_THRESHOLD = 0.18
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE DEFINITIONS
-# Each watch_msg describes exactly what to do for THAT specific point.
-# The lying-flat posture is the global requirement for all phases.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _PHASES = [
-    # ── Intro — zoom / watch ──────────────────────────────────────────────────
     {
-        "id":        "ac_p0_intro",
-        "name":      "Acupressure — General Rules",
-        "start":     3197, "active": 3197, "end": 3200,
-        "zoom":      True,
-        "watch_msg": "Lie flat on your back. Use right index finger or thumb. Hold each point ~30 seconds (~8 deep breaths).",
+        "id": "ac_p0_intro",
+        "name": "Acupressure — General Rules",
+        "start": 3197, "active": 3197, "end": 3200,
+        "zoom": True,
+        "watch_msg": "Lie flat on your back. Use your right index finger or thumb and observe the pressure points.",
     },
-    # ── 1. Left Neck ──────────────────────────────────────────────────────────
     {
-        "id":        "ac_p1_neck",
-        "name":      "Point 1 — Left Neck",
-        "start":     3200, "active": 3202, "end": 3210,
-        "target":    8,
-        "watch_msg": "Place your RIGHT hand gently on the LEFT side of your neck. Hold and breathe.",
-        "check_landmarks": [11, 12, 15, 16, 0],
+        "id": "ac_p1_neck",
+        "name": "Step 1 — Left Neck",
+        "start": 3200, "active": 3202, "end": 3210,
+        "target": 1,
+        "finger": "index",
+        "watch_msg": "Place your right index finger gently on the left side of your neck.",
     },
-    # ── 2. Solar Plexus ───────────────────────────────────────────────────────
     {
-        "id":        "ac_p2_solar",
-        "name":      "Point 2 — Solar Plexus",
-        "start":     3210, "active": 3212, "end": 3240,
-        "target":    8,
-        "watch_msg": "Right index finger at the CENTER of your upper abdomen where the ribcage meets. Press gently.",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p2_solar",
+        "name": "Step 2 — Solar Plexus",
+        "start": 3210, "active": 3212, "end": 3240,
+        "target": 1,
+        "finger": "index",
+        "watch_msg": "Touch the center of the upper abdomen below the chest.",
     },
-    # ── 3. Mid Abdomen ────────────────────────────────────────────────────────
     {
-        "id":        "ac_p3_mid_abdomen",
-        "name":      "Point 3 — Mid Abdomen",
-        "start":     3240, "active": 3242, "end": 3260,
-        "target":    8,
-        "watch_msg": "Move right index finger ONE INCH below the solar plexus and press gently.",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p3_mid_abdomen",
+        "name": "Step 3 — Mid Abdomen",
+        "start": 3240, "active": 3242, "end": 3260,
+        "target": 1,
+        "finger": "index",
+        "watch_msg": "Move one finger-width below the solar plexus and hold.",
     },
-    # ── 4. Above Navel ────────────────────────────────────────────────────────
     {
-        "id":        "ac_p4_above_navel",
-        "name":      "Point 4 — Above Navel",
-        "start":     3260, "active": 3262, "end": 3276,
-        "target":    8,
-        "watch_msg": "Move right index finger ONE INCH above your navel and press gently.",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p4_above_navel",
+        "name": "Step 4 — Above Navel",
+        "start": 3260, "active": 3262, "end": 3276,
+        "target": 1,
+        "finger": "index",
+        "watch_msg": "Place the right index finger slightly above the navel.",
     },
-    # ── 5. Navel Pull Up ──────────────────────────────────────────────────────
     {
-        "id":        "ac_p5_navel_up",
-        "name":      "Point 5 — Navel Pull Up",
-        "start":     3276, "active": 3278, "end": 3298,
-        "target":    8,
-        "watch_msg": "Right index finger INSIDE the navel. Pull the inner edge UPWARD toward your head.",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p5_navel_up",
+        "name": "Step 5 — Navel Pull Up",
+        "start": 3276, "active": 3278, "end": 3298,
+        "target": 1,
+        "finger": "index",
+        "direction": "up",
+        "watch_msg": "Touch the navel with the right index finger and pull upward toward the head.",
     },
-    # ── 6. Navel Push Down ────────────────────────────────────────────────────
     {
-        "id":        "ac_p6_navel_down",
-        "name":      "Point 6 — Navel Push Down",
-        "start":     3298, "active": 3300, "end": 3313,
-        "target":    8,
-        "watch_msg": "Switch to RIGHT THUMB inside the navel. Press the inner edge DOWNWARD toward your feet.",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p6_navel_down",
+        "name": "Step 6 — Navel Push Down",
+        "start": 3298, "active": 3300, "end": 3313,
+        "target": 1,
+        "finger": "thumb",
+        "direction": "down",
+        "watch_msg": "Touch the navel with the right thumb and push downward toward the feet.",
     },
-    # ── 7. Navel Pull Right Shoulder ──────────────────────────────────────────
     {
-        "id":        "ac_p7_navel_r_shoulder",
-        "name":      "Point 7 — Navel → Right Shoulder",
-        "start":     3313, "active": 3315, "end": 3339,
-        "target":    8,
-        "watch_msg": "Right index finger inside navel. Pull inner edge diagonally toward your RIGHT SHOULDER.",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p7_navel_r_shoulder",
+        "name": "Step 7 — Navel to Right Shoulder",
+        "start": 3313, "active": 3315, "end": 3339,
+        "target": 1,
+        "finger": "index",
+        "direction": "right_shoulder",
+        "watch_msg": "Touch the navel with the right index finger and pull toward the right shoulder.",
     },
-    # ── 8. Navel Pull Left Shoulder ───────────────────────────────────────────
     {
-        "id":        "ac_p8_navel_l_shoulder",
-        "name":      "Point 8 — Navel → Left Shoulder",
-        "start":     3339, "active": 3341, "end": 3366,
-        "target":    8,
-        "watch_msg": "Right index finger inside navel. Pull diagonally toward your LEFT SHOULDER.",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p8_navel_l_shoulder",
+        "name": "Step 8 — Navel to Left Shoulder",
+        "start": 3339, "active": 3341, "end": 3366,
+        "target": 1,
+        "finger": "index",
+        "direction": "left_shoulder",
+        "watch_msg": "Touch the navel with the right index finger and pull toward the left shoulder.",
     },
-    # ── 9. Navel Pull Right Thigh ─────────────────────────────────────────────
     {
-        "id":        "ac_p9_navel_r_thigh",
-        "name":      "Point 9 — Navel → Right Thigh",
-        "start":     3366, "active": 3368, "end": 3387,
-        "target":    8,
-        "watch_msg": "Right index finger inside navel. Pull inner edge diagonally toward your RIGHT THIGH.",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p9_navel_r_thigh",
+        "name": "Step 9 — Navel to Right Thigh",
+        "start": 3366, "active": 3368, "end": 3387,
+        "target": 1,
+        "finger": "index",
+        "direction": "right_thigh",
+        "watch_msg": "Touch the navel with the right index finger and pull toward the right thigh.",
     },
-    # ── 10. Navel Push Left Thigh ─────────────────────────────────────────────
     {
-        "id":        "ac_p10_navel_l_thigh",
-        "name":      "Point 10 — Navel → Left Thigh",
-        "start":     3387, "active": 3389, "end": 3405,
-        "target":    8,
-        "watch_msg": "Switch to RIGHT THUMB inside navel. Push diagonally downward toward your LEFT THIGH.",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p10_navel_l_thigh",
+        "name": "Step 10 — Navel to Left Thigh",
+        "start": 3387, "active": 3389, "end": 3405,
+        "target": 1,
+        "finger": "thumb",
+        "direction": "left_thigh",
+        "watch_msg": "Touch the navel with the right thumb and push toward the left thigh.",
     },
-    # ── 11. Right Ribs ────────────────────────────────────────────────────────
     {
-        "id":        "ac_p11_right_ribs",
-        "name":      "Point 11 — Right Ribs",
-        "start":     3405, "active": 3407, "end": 3419,
-        "target":    8,
-        "watch_msg": "Right index finger ONE INCH below your RIGHT ribcage on the center line. Press gently.",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p11_right_ribs",
+        "name": "Step 11 — Right Ribs",
+        "start": 3405, "active": 3407, "end": 3419,
+        "target": 1,
+        "finger": "index",
+        "watch_msg": "Move below the right ribcage and press gently.",
     },
-    # ── 12. Left Ribs ─────────────────────────────────────────────────────────
     {
-        "id":        "ac_p12_left_ribs",
-        "name":      "Point 12 — Left Ribs",
-        "start":     3419, "active": 3421, "end": 3438,
-        "target":    8,
-        "watch_msg": "Right index finger ONE INCH below your LEFT ribcage on the center line. Press gently.",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p12_left_ribs",
+        "name": "Step 12 — Left Ribs",
+        "start": 3419, "active": 3421, "end": 3438,
+        "target": 1,
+        "finger": "index",
+        "watch_msg": "Move below the left ribcage and press gently.",
     },
-    # ── 13. Right Waist ───────────────────────────────────────────────────────
     {
-        "id":        "ac_p13_right_waist",
-        "name":      "Point 13 — Right Waist",
-        "start":     3438, "active": 3440, "end": 3458,
-        "target":    8,
-        "watch_msg": "Right thumb on the soft area between your RIGHT lower rib and hip bone (side waist).",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p13_right_waist",
+        "name": "Step 13 — Right Waist",
+        "start": 3438, "active": 3440, "end": 3458,
+        "target": 1,
+        "finger": "thumb",
+        "watch_msg": "Place the right thumb on the soft area between your right ribs and hip.",
     },
-    # ── 14. Lower Left Abdomen ────────────────────────────────────────────────
     {
-        "id":        "ac_p14_lower_left_abdomen",
-        "name":      "Point 14 — Lower Left Abdomen",
-        "start":     3458, "active": 3460, "end": 3479,
-        "target":    8,
-        "watch_msg": "Right index AND middle fingers together on the midpoint between navel and LEFT groin crease.",
-        "check_landmarks": [11, 12, 15, 16, 23, 24],
+        "id": "ac_p14_lower_left_abdomen",
+        "name": "Step 14 — Lower Left Abdomen",
+        "start": 3458, "active": 3460, "end": 3479,
+        "target": 1,
+        "finger": "index",
+        "watch_msg": "Place the right index finger between the navel and left groin crease.",
     },
-    # ── Finish Rest ───────────────────────────────────────────────────────────
     {
-        "id":        "ac_p15_rest",
-        "name":      "Finish — Rest",
-        "start":     3479, "active": 3481, "end": 3489,
-        "target":    0,
-        "watch_msg": "Relax your arms to your sides. Rest completely. Acupressure is complete.",
-        "check_landmarks": [11, 12, 15, 16],
+        "id": "ac_p15_rest",
+        "name": "Finish — Rest",
+        "start": 3479, "active": 3481, "end": 3489,
+        "target": 0,
+        "watch_msg": "Relax both arms by your sides and rest.",
     },
 ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DATA TYPES
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Point3D:
+    x: float
+    y: float
+    z: float = 0.0
+
+
+@dataclass
+class TouchResult:
+    touched: bool = False
+    xy_close: bool = False
+    z_close: bool = False
+    approaching: bool = False
+    distance_xy: float = 999.0
+    direction: str = "none"
+    confidence: float = 0.0
+    message: str = ""
+
+
+@dataclass
+class FrameEval:
+    phase_id: str = ""
+    touch: TouchResult = field(default_factory=TouchResult)
+    hold_elapsed: float = 0.0
+
+
+class HoldTimer:
+    """Continuous-touch timer used inside ACTIVE state."""
+
+    def __init__(self, required_seconds: float = TARGET_HOLD_SEC):
+        self.required = required_seconds
+        self._start = None
+        self._held = 0.0
+
+    def update(self, touching: bool) -> float:
+        now = time.monotonic()
+        if touching:
+            if self._start is None:
+                self._start = now
+            self._held = min(now - self._start, self.required)
+        else:
+            self._start = None
+            self._held = 0.0
+        return self._held
+
+    def reset(self, required_seconds: float | None = None):
+        if required_seconds is not None:
+            self.required = required_seconds
+        self._start = None
+        self._held = 0.0
+
+    @property
+    def elapsed(self) -> float:
+        return self._held
+
+
+class FingerState:
+    """Smoothed fingertip position with simple velocity tracking."""
+
+    def __init__(self):
+        self._history = deque(maxlen=SMOOTH_N)
+
+    def reset(self):
+        self._history.clear()
+
+    def update(self, pt: Point3D):
+        self._history.append((pt.x, pt.y, pt.z))
+
+    @property
+    def pos(self):
+        if not self._history:
+            return None
+        xs = [p[0] for p in self._history]
+        ys = [p[1] for p in self._history]
+        zs = [p[2] for p in self._history]
+        return Point3D(sum(xs) / len(xs), sum(ys) / len(ys), sum(zs) / len(zs))
+
+    @property
+    def velocity(self):
+        if len(self._history) < 3:
+            return None
+        old = self._history[0]
+        new = self._history[-1]
+        span = len(self._history) - 1
+        return ((new[0] - old[0]) / span, (new[1] - old[1]) / span)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BODY GEOMETRY + POINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _dist(a: Point3D, b: Point3D) -> float:
+    return math.hypot(a.x - b.x, a.y - b.y)
+
+
+def _blend(a: Point3D, b: Point3D, t: float) -> Point3D:
+    return Point3D(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t,
+    )
+
+
+def _point(lm, idx: int):
+    if idx >= len(lm):
+        return None
+    src = lm[idx]
+    return Point3D(src.x, src.y, src.z)
+
+
+class BodyGeometry:
+    """Per-frame body anchors used to derive all acupressure targets."""
+
+    def __init__(self, lm):
+        self.valid = False
+
+        if not visible(lm, L_SHOULDER, R_SHOULDER, L_HIP, R_HIP):
+            return
+
+        self.ls = _point(lm, L_SHOULDER)
+        self.rs = _point(lm, R_SHOULDER)
+        self.lh = _point(lm, L_HIP)
+        self.rh = _point(lm, R_HIP)
+        self.nose = _point(lm, NOSE)
+        self.l_ear = _point(lm, L_EAR)
+        self.l_knee = _point(lm, L_KNEE)
+
+        self.shoulder_mid = _blend(self.ls, self.rs, 0.5)
+        self.hip_mid = _blend(self.lh, self.rh, 0.5)
+        self.torso_height = _dist(self.shoulder_mid, self.hip_mid)
+        self.unit = max(self.torso_height * 0.08, 0.005)
+        self.body_z = (self.ls.z + self.rs.z + self.lh.z + self.rh.z) / 4.0
+        self.valid = True
+
+
+def get_left_neck(geo: BodyGeometry):
+    if not geo.valid:
+        return None
+    if geo.l_ear:
+        return _blend(geo.ls, geo.l_ear, 0.45)
+    if geo.nose:
+        return _blend(geo.ls, geo.nose, 0.38)
+    return Point3D(geo.ls.x, geo.ls.y - geo.unit * 1.5, geo.ls.z)
+
+
+def get_solar_plexus(geo: BodyGeometry):
+    if not geo.valid:
+        return None
+    return _blend(geo.shoulder_mid, geo.hip_mid, 0.22)
+
+
+def get_mid_abdomen(geo: BodyGeometry):
+    solar = get_solar_plexus(geo)
+    if not solar:
+        return None
+    return Point3D(solar.x, solar.y + geo.unit, solar.z)
+
+
+def get_above_navel(geo: BodyGeometry):
+    if not geo.valid:
+        return None
+    return _blend(geo.shoulder_mid, geo.hip_mid, 0.70)
+
+
+def get_navel(geo: BodyGeometry):
+    if not geo.valid:
+        return None
+    return _blend(geo.shoulder_mid, geo.hip_mid, 0.55)
+
+
+def get_right_ribs(geo: BodyGeometry):
+    if not geo.valid:
+        return None
+    return _blend(geo.rs, geo.rh, 0.32)
+
+
+def get_left_ribs(geo: BodyGeometry):
+    if not geo.valid:
+        return None
+    return _blend(geo.ls, geo.lh, 0.32)
+
+
+def get_right_waist(geo: BodyGeometry):
+    if not geo.valid:
+        return None
+    return _blend(geo.rs, geo.rh, 0.65)
+
+
+def get_lower_left_abdomen(geo: BodyGeometry):
+    if not geo.valid:
+        return None
+    navel = get_navel(geo)
+    if geo.l_knee:
+        groin = _blend(geo.lh, geo.l_knee, 0.20)
+    else:
+        groin = Point3D(geo.lh.x, geo.lh.y + geo.unit * 1.5, geo.lh.z)
+    return _blend(navel, groin, 0.5)
+
+
+POINT_GETTERS = {
+    "ac_p1_neck": get_left_neck,
+    "ac_p2_solar": get_solar_plexus,
+    "ac_p3_mid_abdomen": get_mid_abdomen,
+    "ac_p4_above_navel": get_above_navel,
+    "ac_p5_navel_up": get_navel,
+    "ac_p6_navel_down": get_navel,
+    "ac_p7_navel_r_shoulder": get_navel,
+    "ac_p8_navel_l_shoulder": get_navel,
+    "ac_p9_navel_r_thigh": get_navel,
+    "ac_p10_navel_l_thigh": get_navel,
+    "ac_p11_right_ribs": get_right_ribs,
+    "ac_p12_left_ribs": get_left_ribs,
+    "ac_p13_right_waist": get_right_waist,
+    "ac_p14_lower_left_abdomen": get_lower_left_abdomen,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TOUCH DETECTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _classify_direction(dx: float, dy: float) -> str:
+    if abs(dx) < DIR_THRESHOLD and abs(dy) < DIR_THRESHOLD:
+        return "none"
+
+    diag = abs(dx) > DIR_THRESHOLD * 0.5 and abs(dy) > DIR_THRESHOLD * 0.5
+    if diag:
+        if dx > 0 and dy < 0:
+            return "right_up"
+        if dx < 0 and dy < 0:
+            return "left_up"
+        if dx > 0 and dy > 0:
+            return "right_down"
+        if dx < 0 and dy > 0:
+            return "left_down"
+
+    if abs(dy) >= abs(dx):
+        return "up" if dy < 0 else "down"
+    return "right" if dx > 0 else "left"
+
+
+def _direction_matches(detected: str, required: str | None) -> bool:
+    if not required:
+        return True
+    if detected == required:
+        return True
+
+    aliases = {
+        "up": {"up", "left_up", "right_up"},
+        "down": {"down", "left_down", "right_down"},
+        "right_shoulder": {"right_up", "up", "right"},
+        "left_shoulder": {"left_up", "up", "left"},
+        "right_thigh": {"right_down", "down", "right"},
+        "left_thigh": {"left_down", "down", "left"},
+    }
+    return detected in aliases.get(required, {required})
+
+
+class TouchDetector:
+    """Single-file version of the standalone touch detector."""
+
+    def __init__(self):
+        self.index_state = FingerState()
+        self.thumb_state = FingerState()
+
+    def reset(self):
+        self.index_state.reset()
+        self.thumb_state.reset()
+
+    def _pick_state(self, required_finger: str):
+        if required_finger == "thumb":
+            return self.thumb_state
+        return self.index_state
+
+    def update(self, finger_pt: Point3D | None, target: Point3D, geo: BodyGeometry, phase_id: str, required_direction: str | None):
+        if finger_pt is None or not geo.valid or target is None:
+            return TouchResult(message="Show your right hand clearly to the camera.")
+
+        state = self._pick_state("thumb" if phase_id in ("ac_p6_navel_down", "ac_p10_navel_l_thigh", "ac_p13_right_waist") else "index")
+        state.update(finger_pt)
+        pos = state.pos
+        vel = state.velocity
+
+        if pos is None:
+            return TouchResult(message="Show your right hand clearly to the camera.")
+
+        xy_touch = geo.unit * (4.0 if phase_id == "ac_p1_neck" else 2.5)
+        if phase_id in (
+            "ac_p5_navel_up",
+            "ac_p6_navel_down",
+            "ac_p7_navel_r_shoulder",
+            "ac_p8_navel_l_shoulder",
+            "ac_p9_navel_r_thigh",
+            "ac_p10_navel_l_thigh",
+        ):
+            xy_touch = geo.unit * 2.0
+
+        dist_xy = _dist(pos, target)
+        xy_close = dist_xy <= xy_touch
+        z_close = abs(pos.z - geo.body_z) <= Z_TOUCH_THRESHOLD
+
+        approaching = True
+        direction = "none"
+        if vel is not None:
+            direction = _classify_direction(vel[0], vel[1])
+            dx_to = target.x - pos.x
+            dy_to = target.y - pos.y
+            mag = math.hypot(dx_to, dy_to) or 1e-9
+            approach_score = (vel[0] * dx_to + vel[1] * dy_to) / mag
+            approaching = approach_score >= -0.010
+
+        direction_ok = _direction_matches(direction, required_direction)
+        touched = xy_close and z_close and approaching and direction_ok
+
+        xy_score = max(0.0, 1.0 - dist_xy / max(xy_touch * 1.5, 1e-6))
+        z_score = max(0.0, 1.0 - abs(pos.z - geo.body_z) / (Z_TOUCH_THRESHOLD * 2.0))
+        confidence = min(1.0, xy_score * 0.70 + z_score * 0.30)
+
+        return TouchResult(
+            touched=touched,
+            xy_close=xy_close,
+            z_close=z_close,
+            approaching=approaching,
+            distance_xy=dist_xy,
+            direction=direction,
+            confidence=confidence,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -202,308 +539,169 @@ _PHASES = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 class WorkoutController(BaseController):
-    """
-    Acupressure exercise controller.
-
-    Each of the 14 points is a timed hold (~30s / 8 breaths).
-    Rep counting uses BreathDetector gated on:
-      1. error_frames == 0  (pose is currently correct)
-      2. hand IS touching the target point  (confirmed each frame)
-    Pose checking uses body-relative virtual targets.
-    """
+    """Acupressure controller in the same format as the other exercise files."""
 
     def __init__(self):
         super().__init__()
-        self._breath = BreathDetector(min_breath_sec=3.0)
-
-    # ── required by BaseController ────────────────────────────────────────────
+        self._detector = TouchDetector()
+        self._hold = HoldTimer(TARGET_HOLD_SEC)
+        self._frame_eval = FrameEval()
 
     def phases(self) -> list:
         return _PHASES
 
     def on_phase_change(self, phase: dict):
-        self._breath.reset()
+        self._detector.reset()
+        self._hold.reset(TARGET_HOLD_SEC)
+        self._frame_eval = FrameEval()
 
     @property
     def current_phase_name(self) -> str:
         p = self._get_phase(self._video_pos)
         return p["name"] if p else "Acupressure"
 
-    # ── check_pose ────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────
+    # MAIN CHECKS
+    # ─────────────────────────────────────────────────────────────────────
 
     def check_pose(self, lm, w, h, phase) -> tuple:
         pid = phase["id"]
 
-        # Intro and rest — no pose check
-        if pid in ("ac_p0_intro", "ac_p15_rest"):
-            return (False, "Good — relax completely.")
+        if pid == "ac_p0_intro":
+            return (False, "Watch the instructor and prepare for the first point.")
 
-        # 1. Lying flat check
-        flat_ok, flat_err = self._check_lying_flat(lm, w, h)
+        if pid == "ac_p15_rest":
+            if self._is_relaxed_rest(lm):
+                return (False, "Good — relax and breathe naturally.")
+            return (True, "Relax both arms to your sides.")
+
+        flat_ok, flat_msg = self._check_lying_flat(lm)
         if not flat_ok:
-            return (True, flat_err)
+            self._hold.reset(TARGET_HOLD_SEC)
+            return (True, flat_msg)
 
-        # 2. Hand on correct point
-        touched, msg = self._check_hand_on_point(lm, w, h, pid)
-        if not touched:
-            return (True, msg)
+        geo = BodyGeometry(lm)
+        if not geo.valid:
+            self._hold.reset(TARGET_HOLD_SEC)
+            return (True, "Keep your torso clearly visible in the frame.")
 
-        return (False, msg)
+        target = POINT_GETTERS[pid](geo)
+        if target is None:
+            self._hold.reset(TARGET_HOLD_SEC)
+            return (True, "Body landmarks are unclear — adjust your camera.")
 
-    # ── detect_rep ────────────────────────────────────────────────────────────
+        finger_name = phase.get("finger", "index")
+        finger_pt = self._required_finger(lm, finger_name)
+        touch = self._detector.update(
+            finger_pt=finger_pt,
+            target=target,
+            geo=geo,
+            phase_id=pid,
+            required_direction=phase.get("direction"),
+        )
+
+        hold_elapsed = self._hold.update(touch.touched)
+        self._frame_eval = FrameEval(phase_id=pid, touch=touch, hold_elapsed=hold_elapsed)
+
+        if touch.touched:
+            if hold_elapsed < HOLD_CONFIRM_SEC:
+                return (False, f"Correct — keep steady for {HOLD_CONFIRM_SEC - hold_elapsed:.1f}s.")
+
+            remaining = max(0.0, TARGET_HOLD_SEC - hold_elapsed)
+            return (False, f"Correct — hold for {remaining:.0f}s more.")
+
+        return (True, self._feedback_for_touch(phase, touch))
 
     def detect_rep(self, lm, w, h):
-        """
-        Count breaths only when:
-          - error_frames == 0  (no active pose error)
-          - hand is confirmed touching the correct point this frame
-        """
-        p = self._active_phase
-        if not p or p.get("target", 0) == 0:
+        phase = self._active_phase
+        if not phase or phase.get("target", 0) == 0:
             return
 
-        # Gate 1: pose error active
-        if self.error_frames > 0:
+        if self._frame_eval.phase_id != phase["id"]:
             return
 
-        # Gate 2: hand must be on the point right now
-        touched, _ = self._check_hand_on_point(lm, w, h, p["id"])
-        if not touched:
+        touch = self._frame_eval.touch
+        hold_elapsed = self._frame_eval.hold_elapsed
+        if not touch.touched or hold_elapsed < HOLD_CONFIRM_SEC:
             return
 
-        # Feed breath detector with shoulder/chest y-position
-        if visible(lm, 11, 12):
-            self._breath.update((lm[11].y + lm[12].y) / 2)
+        self.rep_count = 1 if hold_elapsed >= TIME_STEP_SEC else 0
 
-        new = self._breath.new_breaths()
-        if new > 0:
-            self.rep_count = min(self.rep_count + new, p.get("target", 8))
+    # ─────────────────────────────────────────────────────────────────────
+    # HELPERS
+    # ─────────────────────────────────────────────────────────────────────
 
-    # =========================================================================
-    # LYING FLAT CHECK
-    # =========================================================================
+    def _required_finger(self, lm, finger_name: str):
+        idx = R_THUMB_TIP if finger_name == "thumb" else R_INDEX_TIP
+        if idx >= len(lm):
+            return None
+        vis = getattr(lm[idx], "visibility", 1.0)
+        if vis < 0.40:
+            return None
+        return Point3D(lm[idx].x, lm[idx].y, lm[idx].z)
 
-    def _check_lying_flat(self, lm, w, h) -> tuple:
-        """
-        Verify user is lying flat on their back.
-        Only fires when landmarks clearly show standing posture.
-        Skipped when landmarks not visible.
+    def _check_lying_flat(self, lm) -> tuple:
+        if not visible(lm, L_SHOULDER, R_SHOULDER, L_HIP, R_HIP):
+            return (False, "Keep your shoulders and hips visible in the frame.")
 
-        Standing signal: shoulders near top of frame (y < 0.35) AND
-        large vertical gap between shoulders and hips (> 0.25).
-        When lying down the camera is overhead/side so both landmarks
-        sit in the mid-y range.
-        """
-        if not visible(lm, 11, 12, 23, 24):
-            return (True, None)   # can't determine — skip silently
-
-        shoulder_y   = (lm[11].y + lm[12].y) / 2
-        hip_y        = (lm[23].y + lm[24].y) / 2
+        shoulder_y = (lm[L_SHOULDER].y + lm[R_SHOULDER].y) / 2.0
+        hip_y = (lm[L_HIP].y + lm[R_HIP].y) / 2.0
         vertical_gap = abs(hip_y - shoulder_y)
+        shoulder_z_gap = abs(lm[L_SHOULDER].z - lm[R_SHOULDER].z)
+        hip_z_gap = abs(lm[L_HIP].z - lm[R_HIP].z)
 
         if shoulder_y < 0.35 and vertical_gap > 0.25:
             return (False, "Please lie flat on your back before starting acupressure.")
-
+        if shoulder_z_gap > 0.45 or hip_z_gap > 0.45:
+            return (False, "Roll your body flatter so both shoulders and hips align.")
         return (True, None)
 
-    # =========================================================================
-    # HAND-ON-POINT CHECK
-    # =========================================================================
+    def _is_relaxed_rest(self, lm) -> bool:
+        if not visible(lm, L_HIP, R_HIP, L_WRIST, R_WRIST):
+            return False
+        hip_y = (lm[L_HIP].y + lm[R_HIP].y) / 2.0
+        return lm[L_WRIST].y > hip_y - 0.03 and lm[R_WRIST].y > hip_y - 0.03
 
-    def _check_hand_on_point(self, lm, w, h, pid) -> tuple:
-        """
-        Check whether the right hand is touching the current acupressure point.
+    def _feedback_for_touch(self, phase: dict, touch: TouchResult) -> str:
+        req = phase.get("direction")
+        pid = phase["id"]
 
-        Steps:
-          1. Compute virtual target pixel using body-relative landmarks
-          2. Find closest visible right-hand landmark (wrist / finger tips)
-          3. Compare distance to a body-scale threshold
-          4. Return (touched: bool, message: str)
+        if not touch.xy_close:
+            return self._correction_msg(pid)
+        if touch.xy_close and not touch.z_close:
+            return "Getting close — press your finger slightly into the body."
+        if req and not _direction_matches(touch.direction, req):
+            return self._direction_hint(req)
+        if not touch.approaching:
+            return "Move the finger toward the point, not away from it."
+        return self._correction_msg(pid)
 
-        Returns (True, positive_msg) when hand is on the point.
-        Returns (False, correction_msg) when hand is off the point or
-        landmarks are not visible enough to compute the target.
-        """
-        target = self._target_point_px(lm, w, h, pid)
-        if target is None:
-            # Can't compute target — landmarks not visible, give benefit of doubt
-            return (True, "Good — keep your right hand on the pressure point.")
-
-        hand = self._best_right_hand_px(lm, w, h, target)
-        if hand is None:
-            # Right hand landmarks completely invisible
-            return (False, self._correction_msg(pid))
-
-        sw        = max(1.0, shoulder_width(lm, w, h))
-        threshold = self._threshold(sw, pid)
-
-        if dist(hand, target) <= threshold:
-            return (True, self._hold_msg(pid))
-
-        return (False, self._correction_msg(pid))
-
-    # ── virtual target computation ────────────────────────────────────────────
-
-    def _target_point_px(self, lm, w, h, pid):
-        """
-        Return the pixel coordinates of the expected acupressure point
-        based on body landmarks. Returns None if required landmarks invisible.
-
-        All points are expressed as a blend ratio between two anchor landmarks:
-          blend(A, B, 0.0) = A,  blend(A, B, 1.0) = B
-
-        Body geometry used:
-          sternum  = midpoint between shoulders (11, 12)
-          navel    = midpoint of the shoulder-midpoint and hip-midpoint quad
-          left/right hip, shoulder, knee landmarks as needed
-        """
-        if not visible(lm, 11, 12, 23, 24):
-            return None
-
-        ls = px(lm, 11, w, h)   # left shoulder
-        rs = px(lm, 12, w, h)   # right shoulder
-        lh = px(lm, 23, w, h)   # left hip
-        rh = px(lm, 24, w, h)   # right hip
-
-        def blend(a, b, t):
-            return (a[0] + (b[0] - a[0]) * t,
-                    a[1] + (b[1] - a[1]) * t)
-
-        sternum = blend(ls, rs, 0.5)                   # center between shoulders
-        hip_mid = blend(lh, rh, 0.5)                   # center between hips
-        navel   = blend(sternum, hip_mid, 0.55)        # slightly below torso center
-
-        # ── p1: Left Neck ─────────────────────────────────────────────────────
-        if pid == "ac_p1_neck":
-            # Neck = halfway between left shoulder and nose/ear
-            if visible(lm, 7):                          # left ear
-                return blend(ls, px(lm, 7, w, h), 0.45)
-            if visible(lm, 0):                          # nose fallback
-                return blend(ls, px(lm, 0, w, h), 0.40)
-            return blend(ls, sternum, -0.30)            # above left shoulder
-
-        # ── p2: Solar Plexus — upper abdomen, ribcage center ──────────────────
-        if pid == "ac_p2_solar":
-            return blend(sternum, navel, 0.22)
-
-        # ── p3: Mid Abdomen — one inch below solar plexus ─────────────────────
-        if pid == "ac_p3_mid_abdomen":
-            return blend(sternum, navel, 0.45)
-
-        # ── p4: Above Navel — one inch above navel ────────────────────────────
-        if pid == "ac_p4_above_navel":
-            return blend(sternum, navel, 0.70)
-
-        # ── p5–p10: Navel points — all centered on navel ──────────────────────
-        if pid in ("ac_p5_navel_up", "ac_p6_navel_down",
-                   "ac_p7_navel_r_shoulder", "ac_p8_navel_l_shoulder",
-                   "ac_p9_navel_r_thigh", "ac_p10_navel_l_thigh"):
-            return navel
-
-        # ── p11: Right Ribs — one inch below right ribcage ────────────────────
-        if pid == "ac_p11_right_ribs":
-            return blend(rs, rh, 0.32)
-
-        # ── p12: Left Ribs — one inch below left ribcage ──────────────────────
-        if pid == "ac_p12_left_ribs":
-            return blend(ls, lh, 0.32)
-
-        # ── p13: Right Waist — soft area between right rib and hip ────────────
-        if pid == "ac_p13_right_waist":
-            return blend(rs, rh, 0.65)
-
-        # ── p14: Lower Left Abdomen — midpoint navel → left groin ─────────────
-        if pid == "ac_p14_lower_left_abdomen":
-            if visible(lm, 25):                         # left knee
-                lk = px(lm, 25, w, h)
-                groin = blend(lh, lk, 0.20)             # just below left hip
-            else:
-                groin = blend(lh, hip_mid, 1.30)        # estimate groin
-            return blend(navel, groin, 0.50)
-
-        return None
-
-    # ── best right-hand landmark ──────────────────────────────────────────────
-
-    def _best_right_hand_px(self, lm, w, h, target):
-        """
-        Find the closest visible right-hand landmark to the target point.
-        Candidate order: index fingertip (20), middle fingertip (22), wrist (16),
-        thumb tip (18), ring fingertip (20), pinky (22).
-        We use wrist + all right-hand fingertips for maximum coverage.
-        """
-        candidates = [16, 18, 20, 22]   # wrist, thumb, index, middle
-        best_pt   = None
-        best_d    = float("inf")
-        for idx in candidates:
-            if not visible(lm, idx):
-                continue
-            pt = px(lm, idx, w, h)
-            d  = dist(pt, target)
-            if d < best_d:
-                best_d  = d
-                best_pt = pt
-        return best_pt
-
-    # ── thresholds ────────────────────────────────────────────────────────────
-
-    def _threshold(self, shoulder_w, pid) -> float:
-        """
-        Distance threshold in pixels for hand-on-point detection.
-        Expressed as a fraction of shoulder_width so it scales with
-        how close the person is to the camera.
-
-        Neck point gets a larger threshold — hand covers the whole neck area.
-        Abdomen / navel points get medium threshold.
-        Rib / waist points get standard threshold.
-        """
-        if pid == "ac_p1_neck":
-            return shoulder_w * 0.75    # neck area is broad
-        if pid in ("ac_p5_navel_up", "ac_p6_navel_down",
-                   "ac_p7_navel_r_shoulder", "ac_p8_navel_l_shoulder",
-                   "ac_p9_navel_r_thigh", "ac_p10_navel_l_thigh"):
-            return shoulder_w * 0.45    # navel — finger must be close
-        if pid in ("ac_p2_solar", "ac_p3_mid_abdomen",
-                   "ac_p4_above_navel", "ac_p14_lower_left_abdomen"):
-            return shoulder_w * 0.50    # abdomen center — slightly relaxed
-        return shoulder_w * 0.42        # ribs / waist — more precise
-
-    # ── messages ──────────────────────────────────────────────────────────────
-
-    def _correction_msg(self, pid) -> str:
-        msgs = {
-            "ac_p1_neck":                  "Place your RIGHT hand on the LEFT side of your neck.",
-            "ac_p2_solar":                 "Touch the CENTER of your upper abdomen (solar plexus) with your right index finger.",
-            "ac_p3_mid_abdomen":           "Move right index finger one inch BELOW the solar plexus.",
-            "ac_p4_above_navel":           "Move right index finger one inch ABOVE your navel.",
-            "ac_p5_navel_up":              "Place right index finger INSIDE your navel and pull upward.",
-            "ac_p6_navel_down":            "Place right THUMB inside your navel and press downward.",
-            "ac_p7_navel_r_shoulder":      "Right index finger in navel — pull toward your RIGHT SHOULDER.",
-            "ac_p8_navel_l_shoulder":      "Right index finger in navel — pull toward your LEFT SHOULDER.",
-            "ac_p9_navel_r_thigh":         "Right index finger in navel — pull toward your RIGHT THIGH.",
-            "ac_p10_navel_l_thigh":        "Right THUMB in navel — push toward your LEFT THIGH.",
-            "ac_p11_right_ribs":           "Right index finger one inch below your RIGHT ribcage.",
-            "ac_p12_left_ribs":            "Right index finger one inch below your LEFT ribcage.",
-            "ac_p13_right_waist":          "Right thumb on the soft area between your RIGHT rib and hip bone.",
-            "ac_p14_lower_left_abdomen":   "Right index + middle fingers between navel and LEFT groin crease.",
+    def _direction_hint(self, required: str) -> str:
+        hints = {
+            "up": "Pull upward toward your head.",
+            "down": "Push downward toward your feet.",
+            "right_shoulder": "Pull diagonally toward your right shoulder.",
+            "left_shoulder": "Pull diagonally toward your left shoulder.",
+            "right_thigh": "Pull diagonally toward your right thigh.",
+            "left_thigh": "Push diagonally toward your left thigh.",
         }
-        return msgs.get(pid, "Keep your right hand on the pressure point.")
+        return hints.get(required, "Adjust the finger direction.")
 
-    def _hold_msg(self, pid) -> str:
+    def _correction_msg(self, pid: str) -> str:
         msgs = {
-            "ac_p1_neck":                  "Good — right hand on left neck. Hold and breathe deeply.",
-            "ac_p2_solar":                 "Good — touching solar plexus. Hold and breathe.",
-            "ac_p3_mid_abdomen":           "Good — touching mid abdomen. Hold and breathe.",
-            "ac_p4_above_navel":           "Good — touching above navel. Hold and breathe.",
-            "ac_p5_navel_up":              "Good — navel point (pull up). Hold and breathe.",
-            "ac_p6_navel_down":            "Good — navel point (push down). Hold and breathe.",
-            "ac_p7_navel_r_shoulder":      "Good — navel (right shoulder direction). Hold and breathe.",
-            "ac_p8_navel_l_shoulder":      "Good — navel (left shoulder direction). Hold and breathe.",
-            "ac_p9_navel_r_thigh":         "Good — navel (right thigh direction). Hold and breathe.",
-            "ac_p10_navel_l_thigh":        "Good — navel (left thigh direction). Hold and breathe.",
-            "ac_p11_right_ribs":           "Good — below right ribs. Hold and breathe.",
-            "ac_p12_left_ribs":            "Good — below left ribs. Hold and breathe.",
-            "ac_p13_right_waist":          "Good — right waist point. Hold and breathe.",
-            "ac_p14_lower_left_abdomen":   "Good — lower left abdomen point. Hold and breathe.",
+            "ac_p1_neck": "Place your right index finger on the left side of your neck.",
+            "ac_p2_solar": "Move your right index finger to the solar plexus.",
+            "ac_p3_mid_abdomen": "Move one finger-width below the solar plexus.",
+            "ac_p4_above_navel": "Move one finger-width above the navel.",
+            "ac_p5_navel_up": "Touch the navel and start pulling upward.",
+            "ac_p6_navel_down": "Touch the navel with the thumb and push downward.",
+            "ac_p7_navel_r_shoulder": "Touch the navel and pull toward the right shoulder.",
+            "ac_p8_navel_l_shoulder": "Touch the navel and pull toward the left shoulder.",
+            "ac_p9_navel_r_thigh": "Touch the navel and pull toward the right thigh.",
+            "ac_p10_navel_l_thigh": "Touch the navel with the thumb and push toward the left thigh.",
+            "ac_p11_right_ribs": "Move below the right ribcage and press gently.",
+            "ac_p12_left_ribs": "Move below the left ribcage and press gently.",
+            "ac_p13_right_waist": "Place the right thumb on the right waist point.",
+            "ac_p14_lower_left_abdomen": "Move to the lower left abdomen point.",
         }
-        return msgs.get(pid, "Good — hold the point and breathe deeply.")
+        return msgs.get(pid, "Adjust your finger position.")
