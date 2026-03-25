@@ -17,6 +17,7 @@ from core.camera import Camera
 from core.pose_engine import PoseEngine
 from core.video_controller import ReferenceVideo
 from core.exercise_registry import ExerciseRegistry
+from core.sarvam_voice import SarvamVoiceCoach, VoiceFrame
 from core.ui_render import render_frame, render_user_frame, render_reference_frame, draw_countdown, draw_intro, draw_fps
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -79,6 +80,7 @@ def main():
     camera      = Camera(0)
     user_engine = PoseEngine("pose_landmarker_heavy.task")
     ref_video   = ReferenceVideo(VIDEO_SOURCE)
+    voice_coach = SarvamVoiceCoach()
 
     wall_start = time.time()
     active_key = None
@@ -152,6 +154,7 @@ def main():
                 controller = registry.get(active_key)
                 if controller:
                     controller.reset_session()
+                    voice_coach.warm_phase_prompts(controller.phases())
                 print(f"→ Exercise: {active_key}")
 
             # ── DETECT USER POSE ──────────────────────────────────────────
@@ -190,6 +193,26 @@ def main():
                 watch_msg   = ""
                 target_reps = 0
                 rep_done    = 0
+
+            active_phase = controller._active_phase if controller else None
+            voice_coach.update(
+                VoiceFrame(
+                    exercise_key = active_key,
+                    phase_id = active_phase.get("id") if active_phase else None,
+                    phase_name = active_phase.get("name", "") if active_phase else "",
+                    coach_state = coach_state,
+                    watch_msg = watch_msg,
+                    message = message,
+                    correct = correct,
+                    rep_done = rep_done,
+                    rep_target = target_reps,
+                    hold_remaining = hold_remaining,
+                    paused = _manual_paused,
+                    video_pos = video_pos,
+                    phase_active = active_phase.get("active") if active_phase else None,
+                    phase_end = active_phase.get("end") if active_phase else None,
+                )
+            )
 
             # ── VIDEO CONTROL ─────────────────────────────────────────────
             # Coach-driven pause (form error / HOLD state)
@@ -251,6 +274,7 @@ def main():
                     print(" Video resumed by user")
 
     finally:
+        voice_coach.shutdown()
         camera.release()
         ref_video.release()
         cv2.destroyAllWindows()

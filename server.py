@@ -36,6 +36,7 @@ from core.camera import Camera
 from core.pose_engine import PoseEngine
 from core.video_controller import ReferenceVideo
 from core.exercise_registry import ExerciseRegistry
+from core.sarvam_voice import SarvamVoiceCoach, VoiceFrame
 from core.ui_render import (
     render_frame,
     render_user_frame,
@@ -224,6 +225,7 @@ def main_loop():
     camera = Camera(0)
     user_engine = PoseEngine("pose_landmarker_heavy.task")
     ref_video = ReferenceVideo(VIDEO_SOURCE)
+    voice_coach = SarvamVoiceCoach()
 
     wall_start = time.time()
     active_key = None
@@ -304,6 +306,7 @@ def main_loop():
                 controller = registry.get(active_key)
                 if controller:
                     controller.reset_session()
+                    voice_coach.warm_phase_prompts(controller.phases())
                 print(f"→ Exercise: {active_key}")
                 session_state.active_exercise = active_key
 
@@ -349,6 +352,26 @@ def main_loop():
             session_state.correct = correct
             session_state.message = message
             session_state.hold_remaining = hold_remaining
+
+            active_phase = controller._active_phase if controller else None
+            voice_coach.update(
+                VoiceFrame(
+                    exercise_key=active_key,
+                    phase_id=active_phase.get("id") if active_phase else None,
+                    phase_name=active_phase.get("name", "") if active_phase else "",
+                    coach_state=coach_state,
+                    watch_msg=watch_msg,
+                    message=message,
+                    correct=correct,
+                    rep_done=rep_done,
+                    rep_target=target_reps,
+                    hold_remaining=hold_remaining,
+                    paused=session_state.is_paused(),
+                    video_pos=video_pos,
+                    phase_active=active_phase.get("active") if active_phase else None,
+                    phase_end=active_phase.get("end") if active_phase else None,
+                )
+            )
 
             # ── VIDEO CONTROL ─────────────────────────────────────────────
             if session_state.is_paused():
@@ -403,6 +426,7 @@ def main_loop():
         print(f"\n✗ Error in main loop: {e}")
     finally:
         session_state._should_stop = True
+        voice_coach.shutdown()
         camera.release()
         ref_video.release()
         print("✓ Resources released")
