@@ -24,11 +24,9 @@ import cv2
 import time
 import threading
 import mediapipe as mp
-import json
 import numpy as np
-from io import BytesIO
 from fastapi import FastAPI, Response, File, UploadFile
-from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -38,7 +36,6 @@ from core.video_controller import ReferenceVideo
 from core.exercise_registry import ExerciseRegistry
 from core.sarvam_voice import SarvamVoiceCoach, VoiceFrame
 from core.ui_render import (
-    render_frame,
     render_user_frame,
     render_reference_frame,
     draw_countdown,
@@ -103,8 +100,10 @@ class SessionState:
         self.lock = threading.Lock()
         self._manual_paused = False
         self._should_stop = False
+        self._running = False
         self._current_frame = None
         self._frame_timestamp = time.time()
+        self.last_error = ""
 
         # Exercise tracking
         self.active_exercise = None
@@ -129,6 +128,52 @@ class SessionState:
         with self.lock:
             return self._manual_paused
 
+    def mark_running(self):
+        with self.lock:
+            self._running = True
+            self._should_stop = False
+            self.last_error = ""
+
+    def mark_stopped(self, error_message: str = ""):
+        with self.lock:
+            self._running = False
+            if error_message:
+                self.last_error = error_message
+
+    def is_running(self):
+        with self.lock:
+            return self._running
+
+    def stop(self):
+        with self.lock:
+            self._should_stop = True
+
+    def should_stop(self):
+        with self.lock:
+            return self._should_stop
+
+    def reset_for_run(self):
+        with self.lock:
+            self._manual_paused = False
+            self._should_stop = False
+            self._current_frame = None
+            self._frame_timestamp = time.time()
+            self.last_error = ""
+            self.active_exercise = None
+            self.rep_count = 0
+            self.target_reps = 0
+            self.coach_state = "WATCH"
+            self.watch_msg = ""
+            self.correct = True
+            self.message = ""
+            self.hold_remaining = 0.0
+            self.video_pos = 0.0
+
+    def update_status(self, **kwargs):
+        with self.lock:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
     def set_frame(self, frame):
         with self.lock:
             self._current_frame = frame.copy() if frame is not None else None
@@ -144,7 +189,9 @@ class SessionState:
         """Get current session state for API responses."""
         with self.lock:
             return {
+                "running": self._running,
                 "paused": self._manual_paused,
+                "reference_video_paused": self._manual_paused,
                 "active_exercise": self.active_exercise,
                 "rep_count": self.rep_count,
                 "target_reps": self.target_reps,
@@ -154,10 +201,51 @@ class SessionState:
                 "message": self.message,
                 "hold_remaining": self.hold_remaining,
                 "video_pos": self.video_pos,
+                "last_error": self.last_error,
             }
 
 
 session_state = SessionState()
+processing_lock = threading.Lock()
+processing_thread = None
+
+
+def is_processing_running():
+    global processing_thread
+    with processing_lock:
+        return processing_thread is not None and processing_thread.is_alive()
+
+
+def start_processing_thread():
+    global processing_thread
+    with processing_lock:
+        if processing_thread is not None and processing_thread.is_alive():
+            return False
+
+        session_state.reset_for_run()
+        processing_thread = threading.Thread(
+            target=main_loop,
+            daemon=True,
+            name="sky-yoga-main-loop",
+        )
+        processing_thread.start()
+        return True
+
+
+def stop_processing_thread(timeout: float = 5.0):
+    global processing_thread
+    with processing_lock:
+        thread = processing_thread
+        session_state.stop()
+
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=timeout)
+
+    with processing_lock:
+        if processing_thread is thread and (thread is None or not thread.is_alive()):
+            processing_thread = None
+
+    return thread is None or not thread.is_alive()
 
 
 def current_exercise(pos: float):
@@ -210,6 +298,8 @@ def main_loop():
     Main video processing loop.
     Runs in background thread to continuously process frames.
     """
+    session_state.mark_running()
+
     print("\n" + "=" * 80)
     print("SKY YOGA AI COACH — API Server")
     print("=" * 80)
@@ -218,21 +308,26 @@ def main_loop():
     print("API    : http://localhost:8000")
     print("=" * 80 + "\n")
 
-    registry = ExerciseRegistry()
-    if not registry.keys():
-        print("  WARNING: No exercises loaded. Check exercises/ folder.")
-
-    camera = Camera(0)
-    user_engine = PoseEngine("pose_landmarker_heavy.task")
-    ref_video = ReferenceVideo(VIDEO_SOURCE)
-    voice_coach = SarvamVoiceCoach()
-
-    wall_start = time.time()
-    active_key = None
-    controller = None
-
+    error_message = ""
+    camera = None
+    user_engine = None
+    ref_video = None
+    voice_coach = None
     try:
-        while not session_state._should_stop:
+        registry = ExerciseRegistry()
+        if not registry.keys():
+            print("  WARNING: No exercises loaded. Check exercises/ folder.")
+
+        camera = Camera(0)
+        user_engine = PoseEngine("pose_landmarker_heavy.task")
+        ref_video = ReferenceVideo(VIDEO_SOURCE)
+        voice_coach = SarvamVoiceCoach()
+
+        wall_start = time.time()
+        active_key = None
+        controller = None
+
+        while not session_state.should_stop():
             # ── CAMERA FRAME ──────────────────────────────────────────────
             frame = camera.read()
             h, w, _ = frame.shape
@@ -247,9 +342,7 @@ def main_loop():
                 render_reference_frame(ref_frame, coach_state="WATCH", video_pos=video_pos)
                 combined = cv2.hconcat([frame, ref_frame])
                 session_state.set_frame(combined)
-
-                session_state.video_pos = video_pos
-                session_state.coach_state = "WATCH"
+                session_state.update_status(video_pos=video_pos, coach_state="WATCH")
                 time.sleep(0.01)
                 continue
 
@@ -263,9 +356,7 @@ def main_loop():
                 render_reference_frame(ref_frame, coach_state="WATCH", video_pos=video_pos)
                 combined = cv2.hconcat([frame, ref_frame])
                 session_state.set_frame(combined)
-
-                session_state.video_pos = video_pos
-                session_state.coach_state = "WATCH"
+                session_state.update_status(video_pos=video_pos, coach_state="WATCH")
                 time.sleep(0.01)
                 continue
 
@@ -274,8 +365,7 @@ def main_loop():
             # Video position — if manually paused this stays frozen
             video_pos = ref_video.position_seconds()
             ex_info = current_exercise(video_pos)
-
-            session_state.video_pos = video_pos
+            session_state.update_status(video_pos=video_pos)
 
             # ── No exercise at this timestamp yet ─────────────────────────
             if ex_info is None:
@@ -284,12 +374,13 @@ def main_loop():
                 render_reference_frame(ref_frame, coach_state="WATCH", video_pos=video_pos)
                 combined = cv2.hconcat([frame, ref_frame])
                 session_state.set_frame(combined)
-
-                session_state.active_exercise = None
-                session_state.coach_state = "WATCH"
-                session_state.watch_msg = ""
-                session_state.rep_count = 0
-                session_state.target_reps = 0
+                session_state.update_status(
+                    active_exercise=None,
+                    coach_state="WATCH",
+                    watch_msg="",
+                    rep_count=0,
+                    target_reps=0,
+                )
 
                 # VIDEO CONTROL
                 if session_state.is_paused():
@@ -308,7 +399,7 @@ def main_loop():
                     controller.reset_session()
                     voice_coach.warm_phase_prompts(controller.phases())
                 print(f"→ Exercise: {active_key}")
-                session_state.active_exercise = active_key
+                session_state.update_status(active_exercise=active_key)
 
             # ── DETECT USER POSE ──────────────────────────────────────────
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -345,13 +436,15 @@ def main_loop():
                 rep_done = 0
 
             # ── UPDATE SESSION STATE ──────────────────────────────────────
-            session_state.coach_state = coach_state
-            session_state.watch_msg = watch_msg
-            session_state.rep_count = rep_done
-            session_state.target_reps = target_reps
-            session_state.correct = correct
-            session_state.message = message
-            session_state.hold_remaining = hold_remaining
+            session_state.update_status(
+                coach_state=coach_state,
+                watch_msg=watch_msg,
+                rep_count=rep_done,
+                target_reps=target_reps,
+                correct=correct,
+                message=message,
+                hold_remaining=hold_remaining,
+            )
 
             active_phase = controller._active_phase if controller else None
             voice_coach.update(
@@ -423,12 +516,17 @@ def main_loop():
     except KeyboardInterrupt:
         print("\n✓ Server interrupted")
     except Exception as e:
+        error_message = str(e)
         print(f"\n✗ Error in main loop: {e}")
     finally:
-        session_state._should_stop = True
-        voice_coach.shutdown()
-        camera.release()
-        ref_video.release()
+        session_state.stop()
+        session_state.mark_stopped(error_message=error_message)
+        if voice_coach is not None:
+            voice_coach.shutdown()
+        if camera is not None:
+            camera.release()
+        if ref_video is not None:
+            ref_video.release()
         print("✓ Resources released")
 
 
